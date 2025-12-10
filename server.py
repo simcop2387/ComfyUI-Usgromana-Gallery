@@ -1,49 +1,26 @@
 # ComfyUI-Usgromana-Gallery/server.py
 
 import os
+import urllib.parse
 from aiohttp import web
 
 import folder_paths
 from server import PromptServer
 
 GALLERY_PREFIX = "/usgromana/gallery"
-
 OUTPUT_DIR = folder_paths.get_output_directory()
-
 
 def _log(msg: str):
     print(f"[Usgromana-Gallery] {msg}", flush=True)
-
-
-# --- Static files: /static_gallery/** -> Comfy output tree ------------------
-
-def _ensure_static_route():
-    app = PromptServer.instance.app
-
-    # avoid duplicating the route on reloads
-    for r in app.router.routes():
-        try:
-            if r.resource.canonical == "/static_gallery":
-                return
-        except Exception:
-            continue
-
-    app.router.add_static("/static_gallery", OUTPUT_DIR, show_index=False)
-    _log(f"Serving static files from {OUTPUT_DIR} at /static_gallery")
-
-
-_ensure_static_route()
-
 
 # --- Helper: collect images recursively ------------------------------------
 
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
 
-
 def _collect_images(limit: int = 400):
     """
-    Walks the entire OUTPUT_DIR tree and returns the newest `limit` images
-    with relative paths so /static_gallery/<relpath> works.
+    Walks the entire OUTPUT_DIR tree and returns the newest `limit` images.
+    Uses standard ComfyUI /view endpoint for URLs.
     """
     entries = []
 
@@ -59,20 +36,33 @@ def _collect_images(limit: int = 400):
             except OSError:
                 continue
 
-            # path relative to OUTPUT_DIR, with forward slashes
-            rel = os.path.relpath(full, OUTPUT_DIR).replace("\\", "/")
+            # Get path relative to OUTPUT_DIR (e.g. "subfolder/image.png")
+            rel = os.path.relpath(full, OUTPUT_DIR)
+            
+            # Split into subfolder and filename for the standard ComfyUI API
+            subfolder = os.path.dirname(rel)
+            filename = os.path.basename(rel)
 
+            # Construct the standard ComfyUI view URL
+            # /view?filename=X&subfolder=Y&type=output
+            params = {
+                "filename": filename,
+                "subfolder": subfolder,
+                "type": "output"
+            }
+            url_query = urllib.parse.urlencode(params)
+            
             entries.append(
                 {
-                    "id": rel,
-                    "filename": rel,
+                    # We keep the relative path as the ID for our delete logic
+                    "filename": rel, 
                     "mtime": stat.st_mtime,
                     "size": stat.st_size,
-                    "url": f"/static_gallery/{rel}",
+                    "url": f"/view?{url_query}",
                 }
             )
 
-    # newest first
+    # Newest first
     entries.sort(key=lambda e: e["mtime"], reverse=True)
 
     if len(entries) > limit:
@@ -86,7 +76,7 @@ def _collect_images(limit: int = 400):
 
 @PromptServer.instance.routes.get(f"{GALLERY_PREFIX}/list")
 async def list_images(request: web.Request):
-    _log("GET /list")
+    # _log("GET /list") # Uncomment for debugging
     images = _collect_images()
     return web.json_response({"images": images})
 
@@ -96,7 +86,9 @@ async def list_images(request: web.Request):
 @PromptServer.instance.routes.post(f"{GALLERY_PREFIX}/delete")
 async def delete_image(request: web.Request):
     data = await request.json()
+    # 'filename' here is the relative path we stored earlier
     filename = (data.get("filename") or "").strip()
+    
     if not filename:
         return web.json_response({"ok": False, "error": "Missing filename"}, status=400)
 
