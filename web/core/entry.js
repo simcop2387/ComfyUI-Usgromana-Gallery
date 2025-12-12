@@ -3,16 +3,15 @@
 import { galleryApi } from "./api.js";
 import { logger } from "./logger.js";
 import { setImages } from "./state.js";
+import { ASSETS, PERFORMANCE } from "./constants.js";
+import { createManagedInterval } from "./utils.js";
 
 import { showOverlay, createOverlay } from "../ui/overlay.js";
 import {
     getGallerySettings,
     subscribeGallerySettings,
+    updateGallerySettings,
 } from "./gallerySettings.js";
-
-const GALLERY_ASSETS_BASE = "/usgromana-gallery/assets";
-const LIGHT_LOGO = `${GALLERY_ASSETS_BASE}/light_logo_transparent.png`;
-const DARK_LOGO  = `${GALLERY_ASSETS_BASE}/dark_logo_transparent.png`;
 
 let initialized = false;
 let loading = false;
@@ -22,7 +21,7 @@ let launchBtn = null;
 let hasCustomPosition = false;
 let resizeHandlerAttached = false;
 let isAnchored = false; 
-let anchorWatchStarted = false;
+let anchorWatchInterval = null;
 
 // ---------------------------------------------------------
 // Image loading
@@ -34,13 +33,65 @@ async function loadImages(force = false) {
     loading = true;
     try {
         const images = await galleryApi.listImages();
-        setImages(images);
+        // Only reset visibleImages on initial load (force=true) or first load
+        setImages(images, force || !loadedOnce);
         loadedOnce = true;
         logger.info(`[UsgromanaGallery] Loaded ${images.length} gallery images`);
     } catch (err) {
         logger.error("[UsgromanaGallery] Failed to load gallery images", err);
     } finally {
         loading = false;
+    }
+}
+
+// ---------------------------------------------------------
+// Real-time file monitoring (polling-based)
+// ---------------------------------------------------------
+let fileWatchInterval = null;
+let lastImageCount = 0;
+
+function startFileWatching() {
+    if (fileWatchInterval) return;
+    
+    const settings = getGallerySettings();
+    if (!settings.enableRealTimeUpdates) {
+        return; // User disabled real-time updates
+    }
+    
+    // Poll for file changes periodically
+    const managed = createManagedInterval(async () => {
+        try {
+            const currentSettings = getGallerySettings();
+            if (!currentSettings.enableRealTimeUpdates) {
+                stopFileWatching();
+                return;
+            }
+            
+            const monitoring = await galleryApi.checkWatchStatus();
+            if (monitoring) {
+                // If monitoring is active, reload images to catch changes
+                // This is a simple polling approach; could be upgraded to WebSocket
+                const images = await galleryApi.listImages();
+                if (images.length !== lastImageCount) {
+                    lastImageCount = images.length;
+                    // Don't reset visibleImages - preserve grid's current filter/sort order
+                    setImages(images, false);
+                    // Grid will auto-update via state subscription
+                }
+            }
+        } catch (err) {
+            // Silently fail - monitoring might not be available
+        }
+    }, PERFORMANCE.FILE_WATCH_POLL_INTERVAL);
+    
+    managed.start();
+    fileWatchInterval = managed;
+}
+
+function stopFileWatching() {
+    if (fileWatchInterval) {
+        fileWatchInterval.stop();
+        fileWatchInterval = null;
     }
 }
 
@@ -57,9 +108,37 @@ function usgFindToolbarContainer(settings) {
         if (explicit) return explicit;
     }
 
-    // 2) Fallbacks for safety
+    // 2) Try to find the Manager button's group first (most specific)
+    const managerButton = document.querySelector('button[aria-label="ComfyUI Manager"], button[title="ComfyUI Manager"]');
+    if (managerButton) {
+        const managerGroup = managerButton.closest('.comfyui-button-group');
+        if (managerGroup) return managerGroup;
+    }
+
+    // 3) Fallbacks for safety - prioritize groups that contain Manager-like buttons
+    const allGroups = Array.from(document.querySelectorAll('.actionbar-container .comfyui-button-group'));
+    // Find group containing Manager button by searching for button with "Manager" text
+    for (const group of allGroups) {
+        const buttons = group.querySelectorAll('button');
+        for (const btn of buttons) {
+            const text = btn.textContent || btn.innerText || '';
+            const ariaLabel = btn.getAttribute('aria-label') || '';
+            const title = btn.getAttribute('title') || '';
+            if (text.includes('Manager') || ariaLabel.includes('Manager') || title.includes('Manager')) {
+                return group;
+            }
+        }
+    }
+
+    // If no Manager group found, try to find the last non-empty group
+    for (let i = allGroups.length - 1; i >= 0; i--) {
+        if (allGroups[i].children.length > 0) {
+            return allGroups[i];
+        }
+    }
+
     const fallbackSelectors = [
-        ".actionbar-container .comfyui-button-group:nth-of-type(2)",
+        ".actionbar-container .comfyui-button-group:last-child",
         ".actionbar-container .comfyui-button-group",
         ".actionbar-container",
         ".queue-button-group",
@@ -88,9 +167,19 @@ function applyButtonPosition(settings) {
     const toolbar = usgFindToolbarContainer(cfg);
 
     if (anchor && toolbar) {
-        // Re-parent into the toolbar
+        // Re-parent into the toolbar, placing after Manager button if it exists
         if (launchBtn.parentElement !== toolbar) {
-            toolbar.appendChild(launchBtn);
+            const managerButton = toolbar.querySelector('button[aria-label="ComfyUI Manager"], button[title="ComfyUI Manager"]');
+            if (managerButton && managerButton.nextSibling) {
+                // Insert after Manager button
+                toolbar.insertBefore(launchBtn, managerButton.nextSibling);
+            } else if (managerButton) {
+                // Manager button exists but has no next sibling, append after it
+                managerButton.parentNode.insertBefore(launchBtn, managerButton.nextSibling);
+            } else {
+                // No Manager button found, just append to group
+                toolbar.appendChild(launchBtn);
+            }
         }
 
         // Make it look like a native Comfy button
@@ -102,16 +191,18 @@ function applyButtonPosition(settings) {
             left: "0",
             right: "0",
             bottom: "0",
-            marginLeft: "6px",
+            marginLeft: "0px",
             marginRight: "0",
             transform: "none",
             boxShadow: "none",   // flat in the bar
             // Let Comfy's CSS handle background/border/etc:
-            borderRadius: "6px",
-            background: "rgba(77, 77, 77, 0.55)",
-            border: "1px solid rgba(148,163,184,0.55)",
             borderRadius: "",
-            padding: "6px 10px",
+            background: "",
+            border: "",
+            padding: "",
+            minWidth: "",
+            minHeight: "",
+            width: "",
         });
 
         hasCustomPosition = false;
@@ -143,18 +234,11 @@ function applyButtonPosition(settings) {
 }
 
 function startAnchorWatch() {
-    if (anchorWatchStarted) return;
-    anchorWatchStarted = true;
+    if (anchorWatchInterval) return;
 
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/6712329c-12ed-47b3-85f9-78457616d544',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'entry.js:147',message:'Anchor watch started',data:{interval:1500},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-    // #endregion
-    setInterval(() => {
+    anchorWatchInterval = createManagedInterval(() => {
         if (!launchBtn) return;
 
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/6712329c-12ed-47b3-85f9-78457616d544',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'entry.js:150',message:'Anchor watch tick',data:{timestamp:Date.now()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-        // #endregion
         const cfg = getGallerySettings();
         const anchor = cfg.anchorToManagerBar;
         const toolbar = usgFindToolbarContainer(cfg);
@@ -162,18 +246,12 @@ function startAnchorWatch() {
         // If anchored, make sure we're inside the toolbar
         if (anchor && toolbar) {
             if (!toolbar.contains(launchBtn)) {
-                // #region agent log
-                fetch('http://127.0.0.1:7242/ingest/6712329c-12ed-47b3-85f9-78457616d544',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'entry.js:159',message:'Button re-anchored to toolbar',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-                // #endregion
                 toolbar.appendChild(launchBtn);
                 applyButtonPosition(cfg);
             }
         } else {
             // Not anchored → make sure we're back on the body (floating)
             if (launchBtn.parentElement !== document.body) {
-                // #region agent log
-                fetch('http://127.0.0.1:7242/ingest/6712329c-12ed-47b3-85f9-78457616d544',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'entry.js:165',message:'Button moved to body',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-                // #endregion
                 document.body.appendChild(launchBtn);
                 applyButtonPosition(cfg);
             }
@@ -181,13 +259,12 @@ function startAnchorWatch() {
 
         // Safety: if somehow removed entirely from DOM, re-attach
         if (!document.body.contains(launchBtn)) {
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/6712329c-12ed-47b3-85f9-78457616d544',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'entry.js:172',message:'Button re-attached to DOM',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-            // #endregion
             document.body.appendChild(launchBtn);
             applyButtonPosition(cfg);
         }
-    }, 1500);
+    }, PERFORMANCE.ANCHOR_WATCH_INTERVAL);
+
+    anchorWatchInterval.start();
 }
 
 // ---------------------------------------------------------
@@ -270,7 +347,7 @@ function createFloatingButton() {
     iconImg.style.transition = "opacity 0.2s ease";
 
     const settings = getGallerySettings();
-    iconImg.src = settings.theme === "light" ? LIGHT_LOGO : DARK_LOGO;
+    iconImg.src = settings.theme === "light" ? ASSETS.LIGHT_LOGO : ASSETS.DARK_LOGO;
 
     const labelSpan = document.createElement("span");
     labelSpan.textContent = "Gallery";
@@ -336,11 +413,22 @@ function createFloatingButton() {
     applyButtonPosition(settings);
 
     // React to settings changes: theme + anchoring
-    subscribeGallerySettings((newSettings) => {
+    const unsubscribeSettings = subscribeGallerySettings((newSettings) => {
         iconImg.src =
-            newSettings.theme === "light" ? LIGHT_LOGO : DARK_LOGO;
+            newSettings.theme === "light" ? ASSETS.LIGHT_LOGO : ASSETS.DARK_LOGO;
         applyButtonPosition(newSettings);
     });
+
+    // Cleanup on button removal (if needed)
+    if (btn.parentElement) {
+        const observer = new MutationObserver(() => {
+            if (!document.body.contains(btn) && anchorWatchInterval) {
+                anchorWatchInterval.stop();
+                unsubscribeSettings();
+            }
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+    }
 
     // Keep alignment sane on resize
     if (!resizeHandlerAttached) {
@@ -366,6 +454,18 @@ export async function initGalleryExtension() {
     // Keep button alive even if Vue re-renders the actionbar
     startAnchorWatch();
 
-    // Preload images once so the first open is fast
+    // Preload images once so the first open is fast (non-blocking via backend)
     await loadImages();
+    
+    // Start file watching for real-time updates (if enabled)
+    startFileWatching();
+    
+    // React to settings changes for file watching
+    subscribeGallerySettings((settings) => {
+        if (settings.enableRealTimeUpdates) {
+            if (!fileWatchInterval) startFileWatching();
+        } else {
+            stopFileWatching();
+        }
+    });
 }

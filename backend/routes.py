@@ -3,17 +3,26 @@
 import os
 import json
 import urllib.parse
+from typing import Set, Callable
 
 from PIL import Image
 from aiohttp import web
 from server import PromptServer
 
-from .files import get_output_dir, list_output_images
+from .files import get_output_dir, list_output_images, IMAGE_EXTENSIONS
+from .file_monitor import FileMonitor
+from .scanner import BackgroundScanner
 from .. import ASSETS_DIR  # from root __init__.py
 
 # Use a unique prefix to avoid clashing with Usgromana RBAC
 USGROMANA_GALLERY = "/usgromana-gallery"
 ROUTE_PREFIX = USGROMANA_GALLERY
+
+# Global state for file monitoring and scanning
+_file_monitor: FileMonitor | None = None
+_background_scanner: BackgroundScanner | None = None
+_file_change_callbacks: list[Callable] = []
+_current_extensions: Set[str] = IMAGE_EXTENSIONS.copy()
 
 # --- Helpers ------------------------------------------------------
 
@@ -78,7 +87,8 @@ async def gallery_list(request: web.Request) -> web.Response:
     recursive subfolders. Also returns a folder list for the UI.
     """
     try:
-        images = list_output_images()
+        # Use current extensions (may be overridden by settings)
+        images = list_output_images(extensions=_current_extensions)
 
         # Apply NSFW filtering based on current user / SFW flag.
         images = _apply_nsfw_filter(request, images)
@@ -123,16 +133,6 @@ async def gallery_image(request: web.Request) -> web.StreamResponse:
     Optional query:
       - size=thumb   → return a cached thumbnail (max ~512px on the long side)
     """
-    import json
-    import time
-    # #region agent log
-    thumb_start = time.time()
-    log_data = {"location": "routes.py:118", "message": "gallery_image request", "data": {"filename": request.query.get("filename"), "size": request.query.get("size")}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "G"}
-    try:
-        with open(r"c:\Users\tansh\.github\ComfyUI-Usgromana-Gallery\.cursor\debug.log", "a", encoding="utf-8") as f:
-            f.write(json.dumps(log_data) + "\n")
-    except: pass
-    # #endregion
     filename = request.query.get("filename")
     if not filename:
         return _json({"ok": False, "error": "Missing filename"}, status=400)
@@ -160,36 +160,12 @@ async def gallery_image(request: web.Request) -> web.StreamResponse:
             )
 
             if needs_regen:
-                # #region agent log
-                thumb_gen_start = time.time()
-                log_data = {"location": "routes.py:152", "message": "Thumbnail generation start", "data": {"filename": filename}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "G"}
-                try:
-                    with open(r"c:\Users\tansh\.github\ComfyUI-Usgromana-Gallery\.cursor\debug.log", "a", encoding="utf-8") as f:
-                        f.write(json.dumps(log_data) + "\n")
-                except: pass
-                # #endregion
                 with Image.open(safe_path) as im:
                     # Preserve aspect, cap the longest side
                     im.thumbnail((512, 512))
                     # Save as PNG regardless of original type
                     im.save(thumb_path, format="PNG")
-                # #region agent log
-                thumb_gen_duration = time.time() - thumb_gen_start
-                log_data = {"location": "routes.py:158", "message": "Thumbnail generation complete", "data": {"filename": filename, "duration_ms": int(thumb_gen_duration * 1000)}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "G"}
-                try:
-                    with open(r"c:\Users\tansh\.github\ComfyUI-Usgromana-Gallery\.cursor\debug.log", "a", encoding="utf-8") as f:
-                        f.write(json.dumps(log_data) + "\n")
-                except: pass
-                # #endregion
 
-            # #region agent log
-            thumb_duration = time.time() - thumb_start
-            log_data = {"location": "routes.py:165", "message": "Thumbnail request complete", "data": {"filename": filename, "duration_ms": int(thumb_duration * 1000), "regenerated": needs_regen}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "G"}
-            try:
-                with open(r"c:\Users\tansh\.github\ComfyUI-Usgromana-Gallery\.cursor\debug.log", "a", encoding="utf-8") as f:
-                    f.write(json.dumps(log_data) + "\n")
-            except: pass
-            # #endregion
             return web.FileResponse(path=thumb_path)
         except Exception as e:
             # Fall back to full image if thumb generation fails
@@ -198,6 +174,89 @@ async def gallery_image(request: web.Request) -> web.StreamResponse:
 
     # Default: serve original full-size image
     return web.FileResponse(path=safe_path)
+
+
+# --- Batch operations ---------------------------------------------
+
+@PromptServer.instance.routes.post(f"{ROUTE_PREFIX}/batch/delete")
+async def gallery_batch_delete(request: web.Request) -> web.Response:
+    """Delete multiple files. Body: { "filenames": ["path1", "path2", ...] }"""
+    try:
+        body = await request.json()
+        filenames = body.get("filenames", [])
+        
+        if not isinstance(filenames, list):
+            return _json({"ok": False, "error": "filenames must be a list"}, status=400)
+        
+        output_dir = get_output_dir()
+        deleted = []
+        errors = []
+        
+        for filename in filenames:
+            if not filename or not isinstance(filename, str):
+                continue
+            
+            safe_path = _safe_join_output(filename)
+            if safe_path is None:
+                errors.append(f"{filename}: invalid path")
+                continue
+            
+            try:
+                if os.path.isfile(safe_path):
+                    os.remove(safe_path)
+                    deleted.append(filename)
+            except OSError as e:
+                errors.append(f"{filename}: {str(e)}")
+        
+        return _json({
+            "ok": True,
+            "deleted": deleted,
+            "errors": errors,
+            "count": len(deleted),
+        })
+    except Exception as e:
+        return _json({"ok": False, "error": str(e)}, status=500)
+
+
+@PromptServer.instance.routes.get(f"{ROUTE_PREFIX}/batch/download")
+async def gallery_batch_download(request: web.Request) -> web.Response:
+    """Download multiple files as ZIP. Query: ?filenames=path1,path2,path3"""
+    try:
+        import zipfile
+        import tempfile
+        from io import BytesIO
+        
+        filenames_str = request.query.get("filenames", "")
+        if not filenames_str:
+            return _json({"ok": False, "error": "Missing filenames"}, status=400)
+        
+        filenames = [f.strip() for f in filenames_str.split(",") if f.strip()]
+        if not filenames:
+            return _json({"ok": False, "error": "No valid filenames"}, status=400)
+        
+        output_dir = get_output_dir()
+        
+        # Create ZIP in memory
+        zip_buffer = BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            for filename in filenames:
+                safe_path = _safe_join_output(filename)
+                if safe_path and os.path.isfile(safe_path):
+                    arcname = os.path.basename(filename)  # Store just the filename in ZIP
+                    zip_file.write(safe_path, arcname)
+        
+        zip_buffer.seek(0)
+        
+        response = web.Response(
+            body=zip_buffer.read(),
+            headers={
+                "Content-Type": "application/zip",
+                "Content-Disposition": 'attachment; filename="gallery_images.zip"',
+            },
+        )
+        return response
+    except Exception as e:
+        return _json({"ok": False, "error": str(e)}, status=500)
 
 # --- Ratings persistence ------------------------------------------
 
@@ -329,3 +388,123 @@ async def gallery_log(request: web.Request) -> web.Response:
     except Exception:
         pass
     return _json({"ok": True})
+
+
+# --- File monitoring and real-time updates -------------------------
+
+def _on_file_change(event_type: str, file_path: str):
+    """Handle file system change events."""
+    try:
+        output_dir = get_output_dir()
+        if not file_path.startswith(output_dir):
+            return
+        
+        relpath = os.path.relpath(file_path, output_dir).replace("\\", "/")
+        
+        # Notify all registered callbacks
+        for callback in _file_change_callbacks:
+            try:
+                callback(event_type, relpath)
+            except Exception as e:
+                print(f"[Usgromana-Gallery] File change callback error: {e}")
+    except Exception as e:
+        print(f"[Usgromana-Gallery] File change handler error: {e}")
+
+
+def _init_file_monitoring():
+    """Initialize file monitoring system."""
+    global _file_monitor, _background_scanner
+    
+    try:
+        output_dir = get_output_dir()
+        if not os.path.isdir(output_dir):
+            return
+        
+        # Initialize background scanner
+        def on_scan_complete(images):
+            # This will be called when background scan completes
+            # The frontend will poll for updates, so we don't need to push here
+            pass
+        
+        _background_scanner = BackgroundScanner(on_scan_complete, _current_extensions)
+        _background_scanner.start_scan()
+        
+        # Initialize file monitor
+        _file_monitor = FileMonitor(output_dir, _on_file_change, _current_extensions)
+        _file_monitor.start(use_polling=False)  # Can be configured via settings
+        
+    except Exception as e:
+        print(f"[Usgromana-Gallery] Failed to initialize file monitoring: {e}")
+
+
+@PromptServer.instance.routes.get(f"{ROUTE_PREFIX}/watch")
+async def gallery_watch(request: web.Request) -> web.Response:
+    """
+    WebSocket-like endpoint for file change notifications.
+    Returns current state and can be polled for updates.
+    """
+    # For now, return a simple endpoint that can be polled
+    # In the future, this could be upgraded to WebSocket
+    return _json({"ok": True, "monitoring": _file_monitor.running if _file_monitor else False})
+
+
+@PromptServer.instance.routes.post(f"{ROUTE_PREFIX}/settings")
+async def gallery_save_settings(request: web.Request) -> web.Response:
+    """Save gallery settings to server."""
+    try:
+        body = await request.json()
+        settings = body.get("settings", {})
+        
+        # Save to user_settings.json in output directory
+        settings_file = os.path.join(get_output_dir(), "usgromana_gallery_settings.json")
+        os.makedirs(os.path.dirname(settings_file), exist_ok=True)
+        
+        # Merge with existing settings
+        existing = {}
+        if os.path.exists(settings_file):
+            try:
+                with open(settings_file, "r", encoding="utf-8") as f:
+                    existing = json.load(f) or {}
+            except Exception:
+                pass
+        
+        merged = {**existing, **settings}
+        
+        with open(settings_file, "w", encoding="utf-8") as f:
+            json.dump(merged, f, indent=2)
+        
+        # Update file extensions if changed
+        if "fileExtensions" in settings:
+            extensions = set(settings["fileExtensions"].split(","))
+            extensions = {ext.strip().lower() for ext in extensions if ext.strip()}
+            if extensions:
+                _current_extensions.clear()
+                _current_extensions.update(extensions)
+                if _file_monitor:
+                    _file_monitor.update_extensions(_current_extensions)
+        
+        # Update polling mode if changed
+        if "usePollingObserver" in settings and _file_monitor:
+            _file_monitor.update_polling(bool(settings["usePollingObserver"]))
+        
+        return _json({"ok": True})
+    except Exception as e:
+        return _json({"ok": False, "error": str(e)}, status=500)
+
+
+@PromptServer.instance.routes.get(f"{ROUTE_PREFIX}/settings")
+async def gallery_get_settings(request: web.Request) -> web.Response:
+    """Load gallery settings from server."""
+    try:
+        settings_file = os.path.join(get_output_dir(), "usgromana_gallery_settings.json")
+        if os.path.exists(settings_file):
+            with open(settings_file, "r", encoding="utf-8") as f:
+                settings = json.load(f) or {}
+                return _json({"ok": True, "settings": settings})
+        return _json({"ok": True, "settings": {}})
+    except Exception as e:
+        return _json({"ok": False, "error": str(e)}, status=500)
+
+
+# Initialize file monitoring when routes are loaded
+_init_file_monitoring()

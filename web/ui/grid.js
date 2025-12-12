@@ -6,6 +6,10 @@ import {
     setSelectedIndex,
     setVisibleImages,
     setImages,
+    registerThumbnail,
+    getImageKey,
+    getImages,
+    resetGridHasSetVisibleImagesFlag,
 } from "../core/state.js";
 import { showDetailsForIndex } from "./details.js";
 import {
@@ -13,7 +17,9 @@ import {
     subscribeGallerySettings,
     updateGallerySettings,
 } from "../core/gallerySettings.js";
-import { galleryApi } from "../core/api.js"; 
+import { galleryApi } from "../core/api.js";
+import { API_BASE, API_ENDPOINTS, PERFORMANCE } from "../core/constants.js";
+import { debounce, unloadImage } from "../core/utils.js"; 
 
 let rootEl = null;
 let gridContentEl = null;
@@ -23,8 +29,18 @@ let ratingMap = new Map();
 let minRatingFilter = 0;
 let gallerySettings = getGallerySettings();
 let searchQuery = "";
+let unsubscribeState = null;
+let unsubscribeSettings = null;
 
 let filterToggleBtn = null;
+let selectedImages = new Set(); // For batch operations
+let batchDownloadBtn = null;
+let batchDeleteBtn = null;
+
+// Debounced search render
+const debouncedRender = debounce(() => {
+    renderGridContent();
+}, PERFORMANCE.DEBOUNCE_DELAY);
 
 const USE_MASONRY_LAYOUT = false;
 
@@ -102,8 +118,7 @@ export function clearGridThumbnails() {
 
     const imgs = gridContentEl.querySelectorAll("img");
     imgs.forEach((img) => {
-        img.src = "";
-        img.removeAttribute("src");
+        unloadImage(img);
     });
 
     gridContentEl.innerHTML = "";
@@ -121,7 +136,11 @@ export async function reloadImagesAndRender() {
 
     try {
         const images = await galleryApi.listImages();
-        setImages(images);   // subscribe() → renderGridContent()
+        
+        // On manual refresh, reset the flag so setImages can reset visibleImages
+        // This allows grid to re-apply filters/sort from scratch
+        // We'll reset the flag in setVisibleImages after renderGridContent() sets it
+        setImages(images, true);   // subscribe() → renderGridContent()
     } catch (err) {
         console.warn("[USG-Gallery] Failed to reload images:", err);
         // fallback: at least render whatever state we already had
@@ -313,20 +332,24 @@ export function initGrid(root) {
     buildStaticUI();
 
     gallerySettings = getGallerySettings();
-    updateFilterToggleVisual();
 
     // ⬇️ Ensure we have images on first open
+    // Reset the flag to allow initial load - always reset on initGrid
+    resetGridHasSetVisibleImagesFlag();
+    
+    if (typeof window !== 'undefined') {
+        window.__USG_GALLERY_GRID_INIT__ = true;
+    }
     reloadImagesAndRender();
 
-    subscribeGallerySettings((s) => {
+    unsubscribeSettings = subscribeGallerySettings((s) => {
         gallerySettings = s;
-        updateFilterToggleVisual();
-        reloadImagesAndRender();
+        renderGridContent();
     });
 
     loadRatingsFromServer();
 
-    subscribe((state) => {
+    unsubscribeState = subscribe((state) => {
         const prevImages = lastState ? lastState.images : null;
         const newImages = state ? state.images : null;
 
@@ -368,11 +391,8 @@ function buildStaticUI() {
     searchInput.addEventListener("blur", () => { window.__USG_GALLERY_CAPTURE__ = false; });
     ["keydown","keyup","keypress"].forEach(evt => searchInput.addEventListener(evt, ev => ev.stopPropagation()));
     searchInput.addEventListener("input", () => {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/6712329c-12ed-47b3-85f9-78457616d544',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:370',message:'Search input changed',data:{query:searchInput.value},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
-        // #endregion
         searchQuery = searchInput.value || "";
-        renderGridContent();
+        debouncedRender();
     });
     filterBar.appendChild(searchInput);
 
@@ -402,8 +422,69 @@ function buildStaticUI() {
     refreshBtn.onclick = () => {
         reloadImagesAndRender();
     };
-
     filterBar.appendChild(refreshBtn);
+
+    // Batch operations buttons
+    batchDownloadBtn = document.createElement("button");
+    batchDownloadBtn.textContent = "Download Selected";
+    batchDownloadBtn.style.display = "none";
+    Object.assign(batchDownloadBtn.style, {
+        borderRadius: "999px",
+        border: "1px solid rgba(148,163,184,0.6)",
+        padding: "4px 10px",
+        fontSize: "12px",
+        background: "rgba(15,23,42,0.9)",
+        color: "#e5e7eb",
+        cursor: "pointer",
+        marginLeft: "6px",
+    });
+    batchDownloadBtn.onclick = async () => {
+        if (selectedImages.size === 0) return;
+        const filenames = Array.from(selectedImages);
+        try {
+            const blob = await galleryApi.batchDownload(filenames);
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = "gallery_images.zip";
+            a.click();
+            URL.revokeObjectURL(url);
+            selectedImages.clear();
+            updateBatchButtons();
+            renderGridContent();
+        } catch (err) {
+            alert("Download failed: " + err.message);
+        }
+    };
+    filterBar.appendChild(batchDownloadBtn);
+
+    batchDeleteBtn = document.createElement("button");
+    batchDeleteBtn.textContent = "Delete Selected";
+    batchDeleteBtn.style.display = "none";
+    Object.assign(batchDeleteBtn.style, {
+        borderRadius: "999px",
+        border: "1px solid rgba(220,38,38,0.6)",
+        padding: "4px 10px",
+        fontSize: "12px",
+        background: "rgba(220,38,38,0.2)",
+        color: "#fca5a5",
+        cursor: "pointer",
+        marginLeft: "6px",
+    });
+    batchDeleteBtn.onclick = async () => {
+        if (selectedImages.size === 0) return;
+        if (!confirm(`Delete ${selectedImages.size} image(s)?`)) return;
+        const filenames = Array.from(selectedImages);
+        try {
+            await galleryApi.batchDelete(filenames);
+            selectedImages.clear();
+            updateBatchButtons();
+            reloadImagesAndRender();
+        } catch (err) {
+            alert("Delete failed: " + err.message);
+        }
+    };
+    filterBar.appendChild(batchDeleteBtn);
 
     options.forEach((opt) => {
         const btn = document.createElement("button");
@@ -434,18 +515,13 @@ function buildStaticUI() {
         alignItems: "center", gap: "4px",
     });
     filterToggleBtn.onclick = () => {
-        const s = getGallerySettings();
-        const newEnabled = !s.showDividers;
-        updateGallerySettings({ showDividers: newEnabled });
-        
-        // This relies on overlay.js being loaded and setting these globals
-        if (newEnabled) {
-            if (window.USG_GALLERY_OPEN_FILTERS) window.USG_GALLERY_OPEN_FILTERS();
-        } else {
-            if (window.USG_GALLERY_CLOSE_FILTERS) window.USG_GALLERY_CLOSE_FILTERS();
+        // Toggle filter panel visibility only (no state change)
+        if (window.USG_GALLERY_TOGGLE_FILTERS) {
+            window.USG_GALLERY_TOGGLE_FILTERS();
+        } else if (window.USG_GALLERY_OPEN_FILTERS) {
+            // Fallback: just open if toggle not available
+            window.USG_GALLERY_OPEN_FILTERS();
         }
-        updateFilterToggleVisual();
-        renderGridContent();
     };
     filterBar.appendChild(filterToggleBtn);
     rootEl.appendChild(filterBar);
@@ -462,7 +538,19 @@ function buildStaticUI() {
     rootEl.appendChild(scrollContainer);
 
     updateFilterButtons();
-    updateFilterToggleVisual();
+    updateBatchButtons();
+}
+
+function updateBatchButtons() {
+    const count = selectedImages.size;
+    if (batchDownloadBtn) {
+        batchDownloadBtn.style.display = count > 0 ? "inline-block" : "none";
+        batchDownloadBtn.textContent = `Download Selected (${count})`;
+    }
+    if (batchDeleteBtn) {
+        batchDeleteBtn.style.display = count > 0 ? "inline-block" : "none";
+        batchDeleteBtn.textContent = `Delete Selected (${count})`;
+    }
 }
 
 function updateFilterButtons() {
@@ -475,14 +563,6 @@ function updateFilterButtons() {
     });
 }
 
-function updateFilterToggleVisual() {
-    if (!filterToggleBtn) return;
-    const s = getGallerySettings();
-    const enabled = !!s.showDividers;
-    filterToggleBtn.style.background = enabled ? "rgba(56,189,248,0.18)" : "rgba(10,10,15,0.6)";
-    filterToggleBtn.style.borderColor = enabled ? "rgba(56,189,248,0.7)" : "rgba(148,163,184,0.55)";
-    filterToggleBtn.style.opacity = enabled ? "1" : "0.85";
-}
 
 // ---------------------------------------------------------------------
 // Core render
@@ -491,15 +571,8 @@ function updateFilterToggleVisual() {
 function renderGridContent() {
     if (!gridContentEl) return;
 
-    // #region agent log
-    const renderStart = Date.now();
-    fetch('http://127.0.0.1:7242/ingest/6712329c-12ed-47b3-85f9-78457616d544',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:488',message:'renderGridContent start',data:{timestamp:renderStart},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-    // #endregion
     gridContentEl.innerHTML = "";
     const allImages = getAllImagesRaw();
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/6712329c-12ed-47b3-85f9-78457616d544',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:492',message:'Images loaded for render',data:{count:allImages.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-    // #endregion
 
     let filtered = allImages.filter((img) => {
         const rating = getRatingForImage(img);
@@ -523,9 +596,18 @@ function renderGridContent() {
         return true;
     });
 
-    const groups = groupImagesForDividers(filtered, gallerySettings);
-    const flatList = [];
-    groups.forEach((g) => g.items.forEach((img) => flatList.push(img)));
+    // Only apply grouping/sorting if filters are enabled
+    let groups;
+    let flatList = [];
+    if (gallerySettings.showDividers) {
+        groups = groupImagesForDividers(filtered, gallerySettings);
+        groups.forEach((g) => g.items.forEach((img) => flatList.push(img)));
+    } else {
+        // When filters are disabled, use images in their original order (no sorting/grouping)
+        flatList = filtered;
+        groups = [{ header: null, items: flatList }];
+    }
+    
     setVisibleImages(flatList);
 
     if (!flatList.length) {
@@ -535,14 +617,11 @@ function renderGridContent() {
             color: "#aaa", fontSize: "14px", textAlign: "center", marginTop: "40px", width: "100%",
         });
         gridContentEl.appendChild(empty);
-        // #region agent log
-        const renderDuration = Date.now() - renderStart;
-        fetch('http://127.0.0.1:7242/ingest/6712329c-12ed-47b3-85f9-78457616d544',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:528',message:'renderGridContent complete (empty)',data:{duration_ms:renderDuration},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-        // #endregion
         return;
     }
 
     const baseThumbWidth = gallerySettings.thumbSize === "sm" ? 120 : gallerySettings.thumbSize === "lg" ? 220 : 160;
+    // Only show dividers if filters are enabled AND a divider mode is selected
     const showDividers = gallerySettings.showDividers && gallerySettings.dividerMode !== "none";
     const layout = gallerySettings.dividerLayout || "inline";
     const pageMode = showDividers && layout === "page";
@@ -631,10 +710,6 @@ function renderGridContent() {
             });
         });
     }
-    // #region agent log
-    const renderDuration = Date.now() - renderStart;
-    fetch('http://127.0.0.1:7242/ingest/6712329c-12ed-47b3-85f9-78457616d544',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:620',message:'renderGridContent complete',data:{duration_ms:renderDuration,items_rendered:flatList.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-    // #endregion
 }
 
 // ---------------------------------------------------------------------
@@ -696,10 +771,18 @@ function createCard(img, index) {
     const card = document.createElement("div");
     card.className = "usg-gallery-card";
     card.dataset.index = index;
+    const imageKey = getImageKey(img);
+    const isSelected = imageKey && selectedImages.has(img.filename || img.relpath);
 
     Object.assign(card.style, {
-        background: "transparent", border: "none", cursor: "pointer", display: "flex",
-        justifyContent: "center", width: "100%", position: "relative", breakInside: "avoid",
+        background: isSelected ? "rgba(56,189,248,0.15)" : "transparent",
+        border: isSelected ? "2px solid rgba(56,189,248,0.7)" : "none",
+        cursor: "pointer",
+        display: "flex",
+        justifyContent: "center",
+        width: "100%",
+        position: "relative",
+        breakInside: "avoid",
     });
 
     const frame = document.createElement("div");
@@ -715,12 +798,16 @@ function createCard(img, index) {
         img.thumb_url ||
         img.url || // backend already gave us a working URL
         (() => {
-            const rel = img.relpath || img.filename || "";
-            const encoded = encodeURIComponent(rel);
-            return `/usgromana-gallery/image?filename=${encoded}&size=thumb`;
+        const rel = img.relpath || img.filename || "";
+        const encoded = encodeURIComponent(rel);
+        return `${API_ENDPOINTS.IMAGE}?filename=${encoded}&size=thumb`;
         })();
 
-    imgEl.src = thumbUrl;
+        // 🔹 Register thumbnail so Details & History can reuse it
+        if (imageKey && thumbUrl) {
+            registerThumbnail(imageKey, thumbUrl);
+        }
+
     imgEl.alt = img.filename || img.relpath || "";
     imgEl.loading = "lazy";
     imgEl.decoding = "async";
@@ -734,6 +821,26 @@ function createCard(img, index) {
         opacity: "0",
         transition: "opacity 0.2s ease",
     });
+    
+    // Use IntersectionObserver for better performance with large grids
+    if ("IntersectionObserver" in window) {
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach((entry) => {
+                if (entry.isIntersecting) {
+                    if (!imgEl.src) {
+                        imgEl.src = thumbUrl;
+                    }
+                    observer.unobserve(imgEl);
+                }
+            });
+        }, { rootMargin: "50px" });
+        
+        observer.observe(imgEl);
+    } else {
+        // Fallback for browsers without IntersectionObserver
+        imgEl.src = thumbUrl;
+    }
+    
     imgEl.onload = () => {
         imgEl.style.opacity = "1";
     };
@@ -783,7 +890,22 @@ function createCard(img, index) {
         });
     }
 
-    card.addEventListener("click", () => {
+    card.addEventListener("click", (ev) => {
+        // Ctrl/Cmd+Click for multi-select
+        if (ev.ctrlKey || ev.metaKey) {
+            ev.stopPropagation();
+            const key = img.filename || img.relpath;
+            if (selectedImages.has(key)) {
+                selectedImages.delete(key);
+            } else {
+                selectedImages.add(key);
+            }
+            updateBatchButtons();
+            renderGridContent(); // Re-render to show selection state
+            return;
+        }
+        
+        // Regular click: open details
         const finalIndex = Number(card.dataset.index);
         setSelectedIndex(finalIndex);
         showDetailsForIndex(finalIndex);
@@ -816,7 +938,7 @@ function setRating(img, rating) {
 
 async function saveRatingToServer(filename, rating) {
     try {
-        await fetch("/usgromana-gallery/rating", {
+        await fetch(API_ENDPOINTS.RATING, {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ filename, rating }),
         });
@@ -825,7 +947,7 @@ async function saveRatingToServer(filename, rating) {
 
 async function loadRatingsFromServer() {
     try {
-        const res = await fetch("/usgromana-gallery/ratings", {
+        const res = await fetch(API_ENDPOINTS.RATINGS, {
             method: "GET", headers: { Accept: "application/json" },
         });
         if (res.ok) {

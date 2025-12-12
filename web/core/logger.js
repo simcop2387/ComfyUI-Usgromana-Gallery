@@ -1,6 +1,8 @@
 // ComfyUI-Usgromana-Gallery/web/core/logger.js
 
-const LOG_ENDPOINT = "/usgromana-gallery/log";
+import { API_ENDPOINTS } from "./constants.js";
+
+const LOG_ENDPOINT = API_ENDPOINTS.LOG;
 
 async function sendRemoteLog(level, message, extra) {
     try {

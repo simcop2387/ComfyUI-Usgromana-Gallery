@@ -1,6 +1,9 @@
 // ComfyUI-Usgromana-Gallery/web/core/gallerySettings.js
 
-const STORAGE_KEY = "usgromana.gallery.settings.v1";
+import { STORAGE_KEYS } from "./constants.js";
+import { galleryApi } from "./api.js";
+
+const STORAGE_KEY = STORAGE_KEYS.SETTINGS;
 
 const DEFAULT_SETTINGS = {
     masonryLayout: false,
@@ -21,10 +24,28 @@ const DEFAULT_SETTINGS = {
 
     // Where to anchor the launch pill
     openButtonBoxQuery: ".actionbar-container .comfyui-button-group:nth-of-type(2)",
+    
+    // File monitoring
+    fileExtensions: ".png,.jpg,.jpeg,.webp,.gif,.bmp", // Comma-separated list
+    usePollingObserver: false, // Use polling instead of native file watcher
+    enableRealTimeUpdates: true, // Enable real-time file monitoring
 };
 
 let settings = loadSettingsFromStorage();
 const listeners = new Set();
+
+// Load server settings on init and merge with local
+(async () => {
+    try {
+        const serverSettings = await galleryApi.getServerSettings();
+        if (serverSettings && Object.keys(serverSettings).length > 0) {
+            settings = { ...settings, ...serverSettings };
+            saveSettingsToStorage(settings);
+        }
+    } catch (err) {
+        // Server settings might not be available yet
+    }
+})();
 
 export function getGallerySettings() {
     return settings;
@@ -33,6 +54,11 @@ export function getGallerySettings() {
 export function updateGallerySettings(patch) {
     settings = { ...settings, ...patch };
     saveSettingsToStorage(settings);
+    
+    // Also save to server for persistence
+    galleryApi.saveServerSettings(settings).catch(() => {
+        // Silently fail if server isn't ready
+    });
 
     for (const fn of listeners) {
         try {

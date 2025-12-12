@@ -1,9 +1,12 @@
 // ComfyUI-Usgromana-Gallery/web/ui/details.js
-// Persistent details overlay + 3-image viewer + history via metadata markers
+// Persistent details overlay + 3-image viewer (1 full + 2 thumbs) + history via metadata markers
+// Details NEVER generates thumbnails. It only reuses thumbs registered by the grid/state.
 
-import { getImages } from "../core/state.js";
+import { getImages, getImageKey, getThumbnail } from "../core/state.js";
 import { galleryApi } from "../core/api.js";
 import { fetchCurrentUser, canEditMetadata } from "../core/user.js";
+import { API_BASE, API_ENDPOINTS, PERFORMANCE } from "../core/constants.js";
+import { formatFileSize, formatDate, unloadImage } from "../core/utils.js";
 
 let modalEl = null;
 let cardEl = null;
@@ -28,24 +31,22 @@ let currentIndex = null;
 let currentImageUrl = null;
 let currentImageInfo = null;
 let metadataVisible = false;
+let leftTargetIndex = null;
+let rightTargetIndex = null;
 
-// --- permissions
+// permissions
 let currentUser = null;
 let canEditMeta = false;
 
-// --- metadata cache (avoid re-fetching constantly)
-const metaCache = new Map(); // filename -> meta object
+// metadata cache (filename -> meta) with size limit to prevent memory leaks
+const metaCache = new Map();
+const MAX_META_CACHE_SIZE = 500;
 
 // --------------------------
-// History marker computation
+// Helpers: history marker
 // --------------------------
-// Your requirement: compute history through metadata markers.
-// We store a stable "history_key" in per-image metadata.
-// - If image has workflow_id -> history_key = "wf:<workflow_id>"
-// - else -> history_key = "stem:<filename-stem>"
 function computeStem(filename = "") {
     const base = (filename.split("/").pop() || filename).replace(/\.[^.]+$/, "");
-    // strip common version suffixes: _00001, -00001, (1), etc.
     return base
         .replace(/[_-]\d{3,}$/g, "")
         .replace(/\(\d+\)$/g, "")
@@ -71,10 +72,21 @@ async function getSavedMeta(filename) {
     try {
         const m = await galleryApi.getMetadata(filename);
         const meta = (m && typeof m === "object") ? m : {};
+        
+        // Limit cache size - remove oldest entries if over limit
+        if (metaCache.size >= MAX_META_CACHE_SIZE) {
+            const firstKey = metaCache.keys().next().value;
+            metaCache.delete(firstKey);
+        }
         metaCache.set(filename, meta);
         return meta;
     } catch {
         const meta = {};
+        // Limit cache size
+        if (metaCache.size >= MAX_META_CACHE_SIZE) {
+            const firstKey = metaCache.keys().next().value;
+            metaCache.delete(firstKey);
+        }
         metaCache.set(filename, meta);
         return meta;
     }
@@ -83,10 +95,9 @@ async function getSavedMeta(filename) {
 async function ensureHistoryMarker(imgInfo) {
     if (!imgInfo || !imgInfo.filename) return null;
 
-    // Merge saved meta into imgInfo (non-destructive)
+    // merge saved meta (non-destructive)
     const saved = await getSavedMeta(imgInfo.filename);
     if (saved && typeof saved === "object") {
-        // copy across common fields if missing
         if (imgInfo.history_key == null && saved.history_key != null) imgInfo.history_key = saved.history_key;
         if (imgInfo.tags == null && Array.isArray(saved.tags)) imgInfo.tags = saved.tags;
         if (imgInfo.rating == null && typeof saved.rating === "number") imgInfo.rating = saved.rating;
@@ -99,18 +110,15 @@ async function ensureHistoryMarker(imgInfo) {
     const key = computeHistoryKey(imgInfo);
     if (!key) return null;
 
-    // If marker already exists, done
+    // already matches
     if (imgInfo.history_key === key) return key;
 
-    // Persist marker if allowed (or try anyway—harmless if backend rejects)
+    // best-effort persist marker (will fail for guests; UI should still work)
     imgInfo.history_key = key;
     try {
         await galleryApi.saveMetadata(imgInfo.filename, { history_key: key });
-        // update cache
-        const merged = { ...(metaCache.get(imgInfo.filename) || {}), history_key: key };
-        metaCache.set(imgInfo.filename, merged);
+        metaCache.set(imgInfo.filename, { ...(metaCache.get(imgInfo.filename) || {}), history_key: key });
     } catch (err) {
-        // We do NOT fail the UI if marker can't be written (guest/no perms)
         console.warn("[UsgromanaGallery] Unable to persist history marker:", err);
     }
 
@@ -118,7 +126,7 @@ async function ensureHistoryMarker(imgInfo) {
 }
 
 // --------------------------
-// History strip (lazy/unload)
+// History strip lazy-load/unload
 // --------------------------
 function setupHistoryLazyLoading(container) {
     if (historyObserver) {
@@ -128,7 +136,7 @@ function setupHistoryLazyLoading(container) {
 
     if (!("IntersectionObserver" in window)) {
         const imgs = container.querySelectorAll("img[data-src]");
-        imgs.forEach((img) => (img.src = img.dataset.src));
+        imgs.forEach((img) => { img.src = img.dataset.src; });
         return;
     }
 
@@ -141,8 +149,8 @@ function setupHistoryLazyLoading(container) {
                 if (entry.isIntersecting) {
                     if (!img.src) img.src = img.dataset.src;
                 } else {
-                    // unload when offscreen (keeps memory down)
-                    img.src = "";
+                    // unload when offscreen to free memory
+                    unloadImage(img);
                 }
             }
         },
@@ -159,8 +167,7 @@ function clearHistoryStrip() {
     }
     if (historyContainer) {
         historyContainer.querySelectorAll("img").forEach((img) => {
-            img.src = "";
-            img.removeAttribute("src");
+            unloadImage(img);
         });
         historyContainer.innerHTML = "";
         historyContainer.style.display = "none";
@@ -168,19 +175,19 @@ function clearHistoryStrip() {
 }
 
 // --------------------------
-// Init persistent overlay
+// Init persistent overlay (build once)
 // --------------------------
 export function initDetails(_rootIgnored) {
-    if (modalEl) return; // persistent: build once
+    if (modalEl) return; // persistent build-once
 
-    // --- permissions fetch (async, UI updates later)
+    // permissions fetch (async)
     fetchCurrentUser()
         .then((user) => {
             currentUser = user;
             canEditMeta = canEditMetadata(user);
             if (modalEl && modalEl.style.display !== "none" && currentImageInfo) {
-                // refresh metadata to reflect edit controls
-                fillMetadata(currentImageInfo);
+                // re-render metadata to reflect edit permissions
+                fillMetadata(currentImageInfo, currentImageInfo.history_key || computeHistoryKey(currentImageInfo));
             }
         })
         .catch(() => {
@@ -188,7 +195,7 @@ export function initDetails(_rootIgnored) {
             canEditMeta = false;
         });
 
-    // Overlay backdrop
+    // backdrop
     modalEl = document.createElement("div");
     modalEl.className = "usg-gallery-modal-overlay";
     Object.assign(modalEl.style, {
@@ -202,12 +209,11 @@ export function initDetails(_rootIgnored) {
         backdropFilter: "none",
     });
 
-    // Close on clicking backdrop (not on card)
     modalEl.addEventListener("click", (ev) => {
         if (ev.target === modalEl) hideDetails();
     });
 
-    // Card container
+    // card container
     cardEl = document.createElement("div");
     cardEl.className = "usg-gallery-modal-card";
     Object.assign(cardEl.style, {
@@ -223,7 +229,6 @@ export function initDetails(_rootIgnored) {
         gap: "10px",
     });
 
-    // Main image
     imgEl = document.createElement("img");
     imgEl.alt = "Selected image";
     imgEl.decoding = "async";
@@ -236,7 +241,7 @@ export function initDetails(_rootIgnored) {
     });
     cardEl.appendChild(imgEl);
 
-    // Buttons row (top-right)
+    // top-right buttons
     const topControls = document.createElement("div");
     Object.assign(topControls.style, {
         position: "absolute",
@@ -286,13 +291,13 @@ export function initDetails(_rootIgnored) {
     topControls.appendChild(btnClose);
     cardEl.appendChild(topControls);
 
-    // Side tiles (prev/next)
+    // side tiles
     leftTile = createSideTile("left");
     rightTile = createSideTile("right");
     modalEl.appendChild(leftTile);
     modalEl.appendChild(rightTile);
 
-    // Metadata panel (right side, hidden by default)
+    // metadata panel
     metaPanel = document.createElement("div");
     Object.assign(metaPanel.style, {
         position: "absolute",
@@ -316,7 +321,6 @@ export function initDetails(_rootIgnored) {
         fontSize: "12px",
     });
 
-    // History container lives in meta panel (single strip)
     historyContainer = document.createElement("div");
     Object.assign(historyContainer.style, {
         marginTop: "10px",
@@ -331,11 +335,11 @@ export function initDetails(_rootIgnored) {
     metaPanel.appendChild(historyContainer);
     modalEl.appendChild(metaPanel);
 
-    // Compose
+    // compose
     modalEl.appendChild(cardEl);
     document.body.appendChild(modalEl);
 
-    // Keyboard nav
+    // keyboard nav
     window.addEventListener("keydown", (ev) => {
         if (!modalEl || modalEl.style.display === "none") return;
 
@@ -386,6 +390,9 @@ function createSideTile(side) {
     });
     tile.appendChild(img);
 
+    if (side === "left") leftTileImg = img;
+    if (side === "right") rightTileImg = img;
+
     const arrow = document.createElement("div");
     arrow.textContent = side === "left" ? "❮" : "❯";
     Object.assign(arrow.style, {
@@ -410,19 +417,12 @@ function createSideTile(side) {
         arrow.style.color = "rgba(255,255,255,0.35)";
     };
 
-    if (side === "left") {
-        leftTileImg = img;
-        tile.onclick = (ev) => {
-            ev.stopPropagation();
-            navigateRelative(-1);
-        };
-    } else {
-        rightTileImg = img;
-        tile.onclick = (ev) => {
-            ev.stopPropagation();
-            navigateRelative(1);
-        };
-    }
+    tile.onclick = (ev) => {
+        ev.stopPropagation();
+        const idx = side === "left" ? leftTargetIndex : rightTargetIndex;
+        if (idx == null) return;
+        showDetailsForIndex(idx);
+    };
 
     return tile;
 }
@@ -474,34 +474,78 @@ export async function showDetailsForIndex(index) {
     const imgInfo = items[currentIndex];
     currentImageInfo = imgInfo;
 
-    // load + merge metadata + write history marker if needed
+    // ensure/merge history marker
     const historyKey = await ensureHistoryMarker(imgInfo);
 
+    // MAIN IMAGE: full-res only here (no thumb fallbacks)
     const rel = imgInfo.relpath || imgInfo.filename || "";
-    currentImageUrl = imgInfo.url || `/usgromana-gallery/image?filename=${encodeURIComponent(rel)}`;
+    currentImageUrl = imgInfo.url || `${API_ENDPOINTS.IMAGE}?filename=${encodeURIComponent(rel)}`;
+
+    // protect against out-of-order loads when navigating fast
+    const loadToken = Symbol("details-load");
+    imgEl._loadToken = loadToken;
 
     imgEl.onload = () => {
+        if (imgEl._loadToken !== loadToken) return;
         resizeCardToImage();
-        if (!metadataVisible) {
-            // tiles already fixed-position; nothing needed
-        }
-        // fill meta (async safe)
         fillMetadata(imgInfo, historyKey);
     };
+
     imgEl.src = currentImageUrl;
 
-    // prev/next tiles: use thumbs to keep it light
-    const prev = items[((currentIndex - 1) % len + len) % len];
-    const next = items[(currentIndex + 1) % len];
+    // PREV/NEXT: thumbnails only, from state registry or existing thumb_url only.
+    // Use the SAME items array that was used to calculate currentIndex
+    const prevIndex = (currentIndex - 1 + len) % len;
+    const nextIndex = (currentIndex + 1) % len;
+    const prev = items[prevIndex];
+    const next = items[nextIndex];
 
-    const prevRel = prev.relpath || prev.filename || "";
-    const nextRel = next.relpath || next.filename || "";
+    leftTargetIndex = prevIndex;
+    rightTargetIndex = nextIndex;
 
-    const prevUrl = prev.thumb_url || `/usgromana-gallery/image?filename=${encodeURIComponent(prevRel)}&size=thumb`;
-    const nextUrl = next.thumb_url || `/usgromana-gallery/image?filename=${encodeURIComponent(nextRel)}&size=thumb`;
+    // Generate thumbnail URLs directly from image data to ensure correctness
+    // Don't rely on registry which may have stale/incorrect mappings
+    let prevThumb = null;
+    let nextThumb = null;
+    
+    if (prev) {
+        // Try thumb_url first (from backend), then generate from relpath
+        prevThumb = prev.thumb_url || prev.url || null;
+        if (!prevThumb) {
+            const rel = prev.relpath || prev.filename || "";
+            if (rel) {
+                prevThumb = `${API_ENDPOINTS.IMAGE}?filename=${encodeURIComponent(rel)}&size=thumb`;
+            }
+        }
+    }
+    
+    if (next) {
+        // Try thumb_url first (from backend), then generate from relpath
+        nextThumb = next.thumb_url || next.url || null;
+        if (!nextThumb) {
+            const rel = next.relpath || next.filename || "";
+            if (rel) {
+                nextThumb = `${API_ENDPOINTS.IMAGE}?filename=${encodeURIComponent(rel)}&size=thumb`;
+            }
+        }
+    }
 
-    if (leftTileImg) leftTileImg.src = prevUrl;
-    if (rightTileImg) rightTileImg.src = nextUrl;
+    if (leftTileImg) {
+        if (prevThumb) {
+            leftTileImg.src = prevThumb;
+        } else {
+            leftTileImg.src = "";
+            leftTileImg.removeAttribute("src");
+        }
+    }
+    if (rightTileImg) {
+        if (nextThumb) {
+            rightTileImg.src = nextThumb;
+        } else {
+            rightTileImg.src = "";
+            rightTileImg.removeAttribute("src");
+        }
+    }
 
     // show overlay
     modalEl.style.display = "flex";
@@ -516,34 +560,31 @@ export async function showDetailsForIndex(index) {
 export function hideDetails() {
     if (!modalEl) return;
 
-    // IMPORTANT: persistent overlay. Do NOT remove from DOM. :contentReference[oaicite:4]{index=4}
+    // persistent overlay: do NOT remove from DOM
     modalEl.style.display = "none";
     modalEl.style.backdropFilter = "none";
 
-    // wipe the 3 live images
-    if (imgEl) {
-        imgEl.src = "";
-        imgEl.removeAttribute("src");
-    }
-    if (leftTileImg) {
-        leftTileImg.src = "";
-        leftTileImg.removeAttribute("src");
-    }
-    if (rightTileImg) {
-        rightTileImg.src = "";
-        rightTileImg.removeAttribute("src");
-    }
+    // wipe the 3 live images (proper cleanup)
+    if (imgEl) unloadImage(imgEl);
+    if (leftTileImg) unloadImage(leftTileImg);
+    if (rightTileImg) unloadImage(rightTileImg);
 
-    // wipe history strip thumbnails + observer
+    // wipe history strip + observer
     clearHistoryStrip();
 
-    // reset meta panel state
+    // reset meta panel
     metadataVisible = false;
     if (metaPanel) metaPanel.style.display = "none";
 
     currentIndex = null;
     currentImageUrl = null;
     currentImageInfo = null;
+    
+    // Clear metadata cache periodically to prevent memory leaks
+    if (metaCache.size > MAX_META_CACHE_SIZE * 0.8) {
+        const keysToDelete = Array.from(metaCache.keys()).slice(0, MAX_META_CACHE_SIZE / 2);
+        keysToDelete.forEach(key => metaCache.delete(key));
+    }
 }
 
 // --------------------------
@@ -555,11 +596,13 @@ function toggleMetadata() {
     if (metadataVisible) {
         metaPanel.style.display = "flex";
         btnMeta.title = "Hide metadata";
+        // if we already have an image open, rebuild metadata (includes history)
+        if (currentImageInfo) {
+            fillMetadata(currentImageInfo, currentImageInfo.history_key || computeHistoryKey(currentImageInfo));
+        }
     } else {
         metaPanel.style.display = "none";
         btnMeta.title = "Show metadata";
-
-        // when hiding metadata, also unload history thumbs (they’re not visible anyway)
         clearHistoryStrip();
     }
 }
@@ -577,7 +620,6 @@ async function persistMetadata() {
             history_key: currentImageInfo.history_key || null,
         });
 
-        // update cache
         metaCache.set(currentImageInfo.filename, {
             ...(metaCache.get(currentImageInfo.filename) || {}),
             tags: currentImageInfo.tags || [],
@@ -623,11 +665,17 @@ function addRow(label, value) {
 async function fillMetadata(imgInfo, historyKey) {
     if (!metaContent) return;
 
-    // clear meta content first (prevents “history panel disappears” merges)
+    // if meta panel is hidden, don’t waste time building it
+    if (!metadataVisible) {
+        clearHistoryStrip();
+        return;
+    }
+
     metaContent.innerHTML = "";
 
     const {
         filename,
+        relpath,
         size,
         mtime,
         tags = [],
@@ -636,35 +684,25 @@ async function fillMetadata(imgInfo, historyKey) {
         workflow_id,
         model,
         model_name,
+        sampler,
         prompt,
         full_prompt,
-        sampler,
         display_name,
     } = imgInfo;
 
-    const dateStr = mtime ? new Date(mtime * 1000).toLocaleString() : "Unknown";
+    const dateStr = formatDate(mtime);
+    const sizeStr = formatFileSize(size);
 
-    let sizeStr = "Unknown";
-    if (typeof size === "number") {
-        if (size > 1024 * 1024) sizeStr = (size / (1024 * 1024)).toFixed(2) + " MB";
-        else if (size > 1024) sizeStr = (size / 1024).toFixed(1) + " KB";
-        else sizeStr = size + " B";
-    }
-
-    addRow("File", filename || "—");
+    addRow("File", filename || relpath || "—");
     addRow("Modified", dateStr);
     addRow("Size", sizeStr);
     addRow("Folder", folder || "Unsorted");
     addRow("Workflow", workflow_id || "—");
     addRow("Model", model || model_name || "—");
     addRow("Sampler", sampler || "—");
+    addRow("Prompt", (full_prompt || prompt || "—"));
 
-    const promptStr = full_prompt || prompt || "—";
-    addRow("Prompt", promptStr);
-
-    // --- Rating + Display Name + Tags (editable if allowed)
-    // keep it simple: we reuse your metadata persistence approach for now
-    // (you want EXIF-native later; that’s backend work)
+    // Editable metadata (only if allowed)
     const editBox = document.createElement("div");
     Object.assign(editBox.style, {
         marginTop: "10px",
@@ -683,7 +721,7 @@ async function fillMetadata(imgInfo, historyKey) {
     });
     editBox.appendChild(title);
 
-    // Rating stars
+    // Stars
     const starsRow = document.createElement("div");
     Object.assign(starsRow.style, { display: "flex", gap: "4px", marginBottom: "8px" });
 
@@ -712,13 +750,7 @@ async function fillMetadata(imgInfo, historyKey) {
     renderStars();
     editBox.appendChild(starsRow);
 
-    // Display name
-    const nameInput = document.createElement("input");
-    nameInput.type = "text";
-    nameInput.value = display_name || "";
-    nameInput.placeholder = "Display name…";
-    nameInput.disabled = !canEditMeta;
-    Object.assign(nameInput.style, {
+    const baseInputStyle = {
         width: "100%",
         padding: "6px 8px",
         borderRadius: "8px",
@@ -727,20 +759,28 @@ async function fillMetadata(imgInfo, historyKey) {
         color: "#e5e7eb",
         marginBottom: "8px",
         outline: "none",
-    });
+    };
+
+    // Display name
+    const nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.value = display_name || "";
+    nameInput.placeholder = "Display name…";
+    nameInput.disabled = !canEditMeta;
+    Object.assign(nameInput.style, baseInputStyle);
     nameInput.onchange = () => {
         imgInfo.display_name = nameInput.value || null;
         persistMetadata();
     };
     editBox.appendChild(nameInput);
 
-    // Tags (comma-separated)
+    // Tags
     const tagsInput = document.createElement("input");
     tagsInput.type = "text";
     tagsInput.value = Array.isArray(tags) ? tags.join(", ") : "";
     tagsInput.placeholder = "tags, comma, separated";
     tagsInput.disabled = !canEditMeta;
-    Object.assign(tagsInput.style, { ...nameInput.style });
+    Object.assign(tagsInput.style, baseInputStyle);
     tagsInput.onchange = () => {
         const arr = (tagsInput.value || "")
             .split(",")
@@ -753,14 +793,14 @@ async function fillMetadata(imgInfo, historyKey) {
 
     metaContent.appendChild(editBox);
 
-    // --- History strip (computed via marker)
+    // History strip (thumbs ONLY from state registry; never generates)
     await buildHistoryStrip(imgInfo, historyKey);
 }
 
 async function buildHistoryStrip(imgInfo, historyKey) {
     if (!historyContainer) return;
 
-    // If metadata panel is hidden, don’t build history (and don’t load thumbs)
+    // Only build when meta panel is visible
     if (!metadataVisible) {
         clearHistoryStrip();
         return;
@@ -774,32 +814,28 @@ async function buildHistoryStrip(imgInfo, historyKey) {
     const items = getImages();
     if (!Array.isArray(items) || items.length === 0) return;
 
-    // Candidate pruning: only consider same workflow_id or same stem
+    // Candidate pruning: workflow_id first, else stem
     const wf = imgInfo.workflow_id || null;
     const stem = computeStem(imgInfo.relpath || imgInfo.filename || "");
 
     const candidates = items.filter((it) => {
         if (!it) return false;
-        if (wf && (it.workflow_id === wf)) return true;
+        if (wf && it.workflow_id === wf) return true;
         const s2 = computeStem(it.relpath || it.filename || "");
         return stem && s2 === stem;
     });
 
     // Load meta for candidates (bounded)
-    const MAX = 80;
     const selected = [];
-    for (let i = 0; i < candidates.length && selected.length < MAX; i++) {
+    for (let i = 0; i < candidates.length && selected.length < PERFORMANCE.HISTORY_MAX; i++) {
         const it = candidates[i];
         const meta = await getSavedMeta(it.filename);
         const itKey = meta.history_key || it.history_key || computeHistoryKey({ ...it, ...meta });
-        if (itKey === key) {
-            selected.push(it);
-        }
+        if (itKey === key) selected.push(it);
     }
 
-    if (selected.length <= 1) return; // no meaningful history
+    if (selected.length <= 1) return;
 
-    // Sort by modified time if present
     selected.sort((a, b) => (a.mtime || 0) - (b.mtime || 0));
 
     historyContainer.style.display = "block";
@@ -828,17 +864,23 @@ async function buildHistoryStrip(imgInfo, historyKey) {
         thumb.loading = "lazy";
         thumb.decoding = "async";
 
-        const rel = it.relpath || it.filename || "";
-        const url = it.thumb_url || `/usgromana-gallery/image?filename=${encodeURIComponent(rel)}&size=thumb`;
+        // THUMBS ONLY: state registry first, then existing thumb_url. No backend generation.
+        const itKey = getImageKey(it);
+        const thumbUrl = (itKey && getThumbnail(itKey)) || it.thumb_url || null;
 
-        thumb.dataset.src = url; // lazy source (loaded by observer)
+        if (!thumbUrl) return; // skip if grid hasn't registered it yet
+
+        thumb.dataset.src = thumbUrl;
         Object.assign(thumb.style, {
             width: "64px",
             height: "64px",
             objectFit: "cover",
             borderRadius: "8px",
             cursor: "pointer",
-            border: (it.filename === imgInfo.filename) ? "2px solid rgba(255,216,107,0.9)" : "1px solid rgba(255,255,255,0.12)",
+            border:
+                it.filename === imgInfo.filename
+                    ? "2px solid rgba(255,216,107,0.9)"
+                    : "1px solid rgba(255,255,255,0.12)",
         });
 
         thumb.onclick = () => {
@@ -848,6 +890,13 @@ async function buildHistoryStrip(imgInfo, historyKey) {
 
         wrap.appendChild(thumb);
     });
+
+    // If nothing was added, hide it
+    if (!wrap.childElementCount) {
+        historyContainer.style.display = "none";
+        historyContainer.innerHTML = "";
+        return;
+    }
 
     historyContainer.appendChild(wrap);
     setupHistoryLazyLoading(historyContainer);

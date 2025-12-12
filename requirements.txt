@@ -1,0 +1,5 @@
+# ComfyUI-Usgromana-Gallery requirements
+# Optional but recommended for real-time file monitoring
+
+watchdog>=3.0.0
+

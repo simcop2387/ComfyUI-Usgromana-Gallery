@@ -7,8 +7,9 @@ from typing import List
 
 import folder_paths
 
-# Basic image extensions
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+# Basic image extensions (matches frontend constants)
+# Can be overridden via settings
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 
 
 @dataclass
@@ -37,39 +38,32 @@ def get_output_dir() -> str:
     return folder_paths.get_output_directory()
 
 
-def _is_image_file(name: str) -> bool:
+def _is_image_file(name: str, extensions: set[str] | None = None) -> bool:
+    """Check if file has a valid image extension."""
     _, ext = os.path.splitext(name)
-    return ext.lower() in IMAGE_EXTENSIONS
+    exts = extensions or IMAGE_EXTENSIONS
+    return ext.lower() in exts
 
 
-def list_output_images(limit: int | None = None) -> List[GalleryImage]:
+def list_output_images(limit: int | None = None, extensions: set[str] | None = None) -> List[GalleryImage]:
     """
     Scan the output directory (recursive) and return image metadata.
     Most recent first.
+    
+    Args:
+        limit: Maximum number of images to return
+        extensions: Set of file extensions to include (defaults to IMAGE_EXTENSIONS)
     """
-    import json
-    import time
-    # #region agent log
-    start_time = time.time()
-    log_data = {"location": "files.py:45", "message": "list_output_images start", "data": {"limit": limit}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "C"}
-    try:
-        with open(r"c:\Users\tansh\.github\ComfyUI-Usgromana-Gallery\.cursor\debug.log", "a", encoding="utf-8") as f:
-            f.write(json.dumps(log_data) + "\n")
-    except: pass
-    # #endregion
     root = get_output_dir()
     if not os.path.isdir(root):
         return []
 
     items: List[GalleryImage] = []
-    dir_count = 0
-    file_count = 0
+    exts = extensions or IMAGE_EXTENSIONS
 
     for dirpath, dirnames, filenames in os.walk(root):
-        dir_count += 1
         for fname in filenames:
-            file_count += 1
-            if not _is_image_file(fname):
+            if not _is_image_file(fname, exts):
                 continue
 
             full_path = os.path.join(dirpath, fname)
@@ -101,12 +95,4 @@ def list_output_images(limit: int | None = None) -> List[GalleryImage]:
     if limit is not None:
         items = items[:limit]
 
-    duration = time.time() - start_time
-    # #region agent log
-    log_data = {"location": "files.py:90", "message": "list_output_images complete", "data": {"count": len(items), "dirs_scanned": dir_count, "files_scanned": file_count, "duration_ms": int(duration * 1000)}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "C"}
-    try:
-        with open(r"c:\Users\tansh\.github\ComfyUI-Usgromana-Gallery\.cursor\debug.log", "a", encoding="utf-8") as f:
-            f.write(json.dumps(log_data) + "\n")
-    except: pass
-    # #endregion
     return items

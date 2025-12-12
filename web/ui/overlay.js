@@ -1,16 +1,14 @@
 // ComfyUI-Usgromana-Gallery/web/ui/overlay.js
 
 import { initGrid, clearGridThumbnails } from "./grid.js";
+import { resetGridHasSetVisibleImagesFlag } from "../core/state.js";
 import { initDetails, hideDetails } from "./details.js"; 
 import {
     getGallerySettings,
     updateGallerySettings,
     subscribeGallerySettings,
 } from "../core/gallerySettings.js";
-
-const GALLERY_ASSETS_BASE = "/usgromana-gallery/assets";
-const LIGHT_LOGO = `${GALLERY_ASSETS_BASE}/light_logo_transparent.png`;
-const DARK_LOGO  = `${GALLERY_ASSETS_BASE}/dark_logo_transparent.png`;
+import { ASSETS } from "../core/constants.js";
 
 let overlayEl = null;
 let gridRootEl = null;
@@ -20,6 +18,7 @@ let settingsModalEl = null;
 // Floating filter panel
 let filterPanelEl = null;
 let lastInlineDividerStyle = "timeline";
+let filterPanelApplyFromSettings = null; // Store reference to apply function
 
 // -------------------------------------------------------------------
 // Overlay creation
@@ -82,7 +81,7 @@ function ensureOverlay() {
 
     const logoImg = document.createElement("img");
     logoImg.alt = "Usgromana Gallery Pro";
-    logoImg.src = DARK_LOGO;
+    logoImg.src = ASSETS.DARK_LOGO;
     Object.assign(logoImg.style, {
         height: "18px",
         width: "auto",
@@ -144,9 +143,6 @@ function ensureOverlay() {
     });
     
     closeButton.onclick = () => {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/6712329c-12ed-47b3-85f9-78457616d544',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'overlay.js:146',message:'Overlay closing - cleanup start',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-        // #endregion
         // Hide overlay
         overlayEl.style.display = "none";
         // Close the floating filter panel
@@ -155,9 +151,6 @@ function ensureOverlay() {
         clearGridThumbnails();
         // Also close the big details overlay if it is open
         hideDetails();
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/6712329c-12ed-47b3-85f9-78457616d544',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'overlay.js:155',message:'Overlay closed - cleanup complete',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-        // #endregion
     };
 
     rightHeader.appendChild(closeButton);
@@ -195,12 +188,18 @@ function ensureOverlay() {
     ensureOverlayStyles();
 
     // Init grid + details
+    // Reset the gridHasSetVisibleImages flag on first overlay creation
+    // This ensures images load properly when gallery is first opened
+    if (typeof window !== 'undefined' && !window.__USG_GALLERY_OVERLAY_CREATED__) {
+        window.__USG_GALLERY_OVERLAY_CREATED__ = true;
+        resetGridHasSetVisibleImagesFlag();
+    }
     initGrid(gridRootEl);
     initDetails(null); // details attaches its own modal
 
     // Theme/logo + remember last inline divider style
     subscribeGallerySettings((s) => {
-        logoImg.src = s.theme === "light" ? LIGHT_LOGO : DARK_LOGO;
+        logoImg.src = s.theme === "light" ? ASSETS.LIGHT_LOGO : ASSETS.DARK_LOGO;
         if (s.dividerStyle && s.dividerStyle !== "page") {
             lastInlineDividerStyle = s.dividerStyle;
         }
@@ -297,6 +296,25 @@ function openSettingsModal(panel) {
         addToggle("Enable drag & drop", "enableDrag");
         addToggle("Show rating overlay in grid", "showRatingInGrid");
         addToggle("Anchor Gallery pill to top bar", "anchorToManagerBar");
+        addToggle("Enable real-time file updates", "enableRealTimeUpdates");
+        addToggle("Use polling file observer", "usePollingObserver");
+        
+        // Initialize checkbox states from current settings
+        const toggles = form.querySelectorAll('input[type="checkbox"]');
+        toggles.forEach((cb) => {
+            const key = Object.keys(current).find(k => {
+                const label = cb.parentElement?.querySelector('span')?.textContent;
+                return label && (
+                    (label.includes("Masonry") && k === "masonryLayout") ||
+                    (label.includes("drag") && k === "enableDrag") ||
+                    (label.includes("rating") && k === "showRatingInGrid") ||
+                    (label.includes("Anchor") && k === "anchorToManagerBar") ||
+                    (label.includes("real-time") && k === "enableRealTimeUpdates") ||
+                    (label.includes("polling") && k === "usePollingObserver")
+                );
+            });
+            if (key) cb.checked = Boolean(current[key]);
+        });
 
         // Theme
         const themeRow = document.createElement("div");
@@ -350,6 +368,37 @@ function openSettingsModal(panel) {
         sizeRow.appendChild(sizeSelect);
         form.appendChild(sizeRow);
 
+        // File extensions
+        const extRow = document.createElement("div");
+        Object.assign(extRow.style, {
+            display: "flex",
+            flexDirection: "column",
+            gap: "4px",
+            marginTop: "4px",
+        });
+        const extLabel = document.createElement("span");
+        extLabel.textContent = "File extensions (comma-separated):";
+        const extInput = document.createElement("input");
+        extInput.type = "text";
+        extInput.value = current.fileExtensions || ".png,.jpg,.jpeg,.webp,.gif,.bmp";
+        Object.assign(extInput.style, {
+            padding: "4px 8px",
+            borderRadius: "6px",
+            border: "1px solid rgba(148,163,184,0.35)",
+            background: "rgba(15,23,42,0.38)",
+            color: "#e5e7eb",
+            fontSize: "11px",
+            outline: "none",
+            width: "100%",
+            boxSizing: "border-box",
+        });
+        extInput.onchange = () => {
+            updateGallerySettings({ fileExtensions: extInput.value });
+        };
+        extRow.appendChild(extLabel);
+        extRow.appendChild(extInput);
+        form.appendChild(extRow);
+
         settingsModalEl.appendChild(form);
 
         const footer = document.createElement("div");
@@ -389,13 +438,19 @@ function openSettingsModal(panel) {
 function openFilterPanel() {
     const current = getGallerySettings();
 
+    // If panel exists and is visible, toggle it closed
+    if (filterPanelEl && filterPanelEl.style.display !== "none") {
+        filterPanelEl.style.display = "none";
+        return;
+    }
+
     if (!filterPanelEl) {
         filterPanelEl = document.createElement("div");
-        Object.assign(filterPanelEl.style, {
+        Object.assign(        filterPanelEl.style, {
             position: "fixed",
             top: "90px",
             right: "40px",
-            width: "320px",
+            width: "280px",
             background: "rgba(15,23,42,0.92)",
             borderRadius: "14px",
             border: "1px solid rgba(148,163,184,0.35)",
@@ -454,6 +509,30 @@ function openFilterPanel() {
             gap: "8px",
             fontSize: "11px",
         });
+
+        // Enable dividers toggle
+        const enableRow = document.createElement("div");
+        Object.assign(enableRow.style, {
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: "6px",
+            marginBottom: "4px",
+            paddingBottom: "8px",
+            borderBottom: "1px solid rgba(51,65,85,0.5)",
+        });
+        const enableLabel = document.createElement("span");
+        enableLabel.textContent = "Enable filters:";
+        const enableCheckbox = document.createElement("input");
+        enableCheckbox.type = "checkbox";
+        Object.assign(enableCheckbox.style, {
+            cursor: "pointer",
+            width: "16px",
+            height: "16px",
+        });
+        enableRow.appendChild(enableLabel);
+        enableRow.appendChild(enableCheckbox);
+        body.appendChild(enableRow);
 
         // Sort type (dividerMode)
         const sortRow = document.createElement("div");
@@ -606,9 +685,44 @@ function openFilterPanel() {
         filterPanelEl.appendChild(body);
         document.body.appendChild(filterPanelEl);
 
+        // --- Enable/disable filter controls based on checkbox ---
+        const updateControlsState = (enabled) => {
+            const disabledStyle = {
+                opacity: "0.4",
+                cursor: "not-allowed",
+            };
+            const enabledStyle = {
+                opacity: "1",
+                cursor: "pointer",
+            };
+
+            // Disable/enable selects
+            [sortSelect, arrangeSelect, dirSelect, styleSelect].forEach((select) => {
+                select.disabled = !enabled;
+                Object.assign(select.style, enabled ? enabledStyle : disabledStyle);
+            });
+
+            // Disable/enable buttons
+            [splitBtn, inlineBtn].forEach((btn) => {
+                btn.disabled = !enabled;
+                Object.assign(btn.style, enabled ? enabledStyle : disabledStyle);
+            });
+
+            // Update label opacity
+            [sortLabel, arrangeLabel, dirLabel, modeLabel, styleLabel].forEach((label) => {
+                label.style.opacity = enabled ? "1" : "0.4";
+            });
+        };
+
         // --- Wiring updates ------------------------------------------
         const applyFromSettings = () => {
             const s = getGallerySettings();
+
+            const enabled = !!s.showDividers;
+            enableCheckbox.checked = enabled;
+            
+            // Update control states
+            updateControlsState(enabled);
 
             sortSelect.value = s.dividerMode || "none";
             arrangeSelect.value = s.arrangeBy || "none";
@@ -627,30 +741,48 @@ function openFilterPanel() {
             styleSelect.value = s.dividerStyle || "timeline";
         };
 
+        enableCheckbox.onchange = () => {
+            const enabled = enableCheckbox.checked;
+            updateControlsState(enabled);
+            updateGallerySettings({ showDividers: enabled });
+        };
+
         sortSelect.onchange = () => {
-            updateGallerySettings({ dividerMode: sortSelect.value });
+            if (!sortSelect.disabled) {
+                updateGallerySettings({ dividerMode: sortSelect.value });
+            }
         };
 
         arrangeSelect.onchange = () => {
-            updateGallerySettings({ arrangeBy: arrangeSelect.value });
+            if (!arrangeSelect.disabled) {
+                updateGallerySettings({ arrangeBy: arrangeSelect.value });
+            }
         };
 
         dirSelect.onchange = () => {
-            updateGallerySettings({
-                sortAscending: dirSelect.value === "asc",
-            });
+            if (!dirSelect.disabled) {
+                updateGallerySettings({
+                    sortAscending: dirSelect.value === "asc",
+                });
+            }
         };
 
         splitBtn.onclick = () => {
-            updateGallerySettings({ dividerLayout: "page", showDividers: true });
+            if (!splitBtn.disabled) {
+                updateGallerySettings({ dividerLayout: "page" });
+            }
         };
 
         inlineBtn.onclick = () => {
-            updateGallerySettings({ dividerLayout: "inline", showDividers: true });
+            if (!inlineBtn.disabled) {
+                updateGallerySettings({ dividerLayout: "inline" });
+            }
         };
 
         styleSelect.onchange = () => {
-            updateGallerySettings({ dividerStyle: styleSelect.value || "timeline" });
+            if (!styleSelect.disabled) {
+                updateGallerySettings({ dividerStyle: styleSelect.value || "timeline" });
+            }
         };
 
         // Dragging
@@ -659,8 +791,15 @@ function openFilterPanel() {
         // Keep panel synced when settings change elsewhere
         subscribeGallerySettings(() => applyFromSettings());
         applyFromSettings();
+        
+        // Store reference for later use
+        filterPanelApplyFromSettings = applyFromSettings;
     } else {
         filterPanelEl.style.display = "flex";
+        // Ensure controls are in correct state when panel is shown again
+        if (filterPanelApplyFromSettings) {
+            filterPanelApplyFromSettings();
+        }
     }
 }
 
@@ -728,4 +867,5 @@ function ensureOverlayStyles() {
 if (typeof window !== "undefined") {
     window.USG_GALLERY_OPEN_FILTERS = () => openFilterPanel();
     window.USG_GALLERY_CLOSE_FILTERS = () => closeFilterPanel();
+    window.USG_GALLERY_TOGGLE_FILTERS = () => openFilterPanel(); // Toggle function
 }
