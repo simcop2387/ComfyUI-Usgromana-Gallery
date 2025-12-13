@@ -333,7 +333,8 @@ export function initDetails(_rootIgnored) {
 
     metaPanel.appendChild(metaContent);
     metaPanel.appendChild(historyContainer);
-    modalEl.appendChild(metaPanel);
+    // Attach metadata panel to cardEl so it's positioned relative to the card
+    cardEl.appendChild(metaPanel);
 
     // compose
     modalEl.appendChild(cardEl);
@@ -596,6 +597,31 @@ function toggleMetadata() {
     if (metadataVisible) {
         metaPanel.style.display = "flex";
         btnMeta.title = "Hide metadata";
+        
+        // Collapse side tiles when metadata is shown
+        if (leftTile) {
+            leftTile.style.display = "none";
+        }
+        if (rightTile) {
+            rightTile.style.display = "none";
+        }
+        
+        // Adjust layout: card moves left, metadata panel on right
+        if (cardEl) {
+            // Card should be positioned to the left to make room for metadata panel
+            Object.assign(cardEl.style, {
+                position: "relative",
+                marginRight: "360px", // Make room for metadata panel (340px + 20px gap)
+                transition: "margin-right 0.3s ease",
+            });
+        }
+        
+        // Metadata panel is already positioned absolutely, just ensure it's visible
+        if (metaPanel) {
+            // Panel is already positioned absolute with right: 0, which is correct
+            // Just ensure it's displayed
+        }
+        
         // if we already have an image open, rebuild metadata (includes history)
         if (currentImageInfo) {
             fillMetadata(currentImageInfo, currentImageInfo.history_key || computeHistoryKey(currentImageInfo));
@@ -604,6 +630,21 @@ function toggleMetadata() {
         metaPanel.style.display = "none";
         btnMeta.title = "Show metadata";
         clearHistoryStrip();
+        
+        // Restore side tiles when metadata is hidden
+        if (leftTile) {
+            leftTile.style.display = "flex";
+        }
+        if (rightTile) {
+            rightTile.style.display = "flex";
+        }
+        
+        // Restore card position: center
+        if (cardEl) {
+            Object.assign(cardEl.style, {
+                marginRight: "0",
+            });
+        }
     }
 }
 
@@ -693,7 +734,67 @@ async function fillMetadata(imgInfo, historyKey) {
     const dateStr = formatDate(mtime);
     const sizeStr = formatFileSize(size);
 
-    addRow("File", filename || relpath || "—");
+    // File name (editable for admins)
+    const fileRow = document.createElement("div");
+    Object.assign(fileRow.style, { marginBottom: "8px" });
+    
+    const fileNameLabel = document.createElement("div");
+    Object.assign(fileNameLabel.style, {
+        fontSize: "10px",
+        textTransform: "uppercase",
+        letterSpacing: "0.08em",
+        color: "rgba(200,200,200,0.7)",
+        marginBottom: "2px",
+    });
+    fileNameLabel.textContent = "File";
+    
+    const fileNameValue = document.createElement("div");
+    Object.assign(fileNameValue.style, {
+        fontSize: "12px",
+        color: "#f0f0f0",
+        wordBreak: "break-word",
+    });
+    
+    if (canEditMeta && currentUser && (currentUser.is_admin === true || (Array.isArray(currentUser.groups) && currentUser.groups.includes("admin")))) {
+        // Admin can edit filename
+        const fileNameInput = document.createElement("input");
+        fileNameInput.type = "text";
+        fileNameInput.value = filename || relpath || "";
+        Object.assign(fileNameInput.style, {
+            width: "100%",
+            padding: "4px 6px",
+            borderRadius: "6px",
+            border: "1px solid rgba(255,255,255,0.18)",
+            background: "rgba(0,0,0,0.25)",
+            color: "#e5e7eb",
+            fontSize: "12px",
+            outline: "none",
+        });
+        fileNameInput.onchange = async () => {
+            const newName = fileNameInput.value.trim();
+            if (newName && newName !== filename) {
+                try {
+                    await galleryApi.renameFile(filename, newName);
+                    // Update current image info
+                    currentImageInfo.filename = newName;
+                    currentImageInfo.relpath = newName;
+                    // Reload metadata
+                    fillMetadata(currentImageInfo, currentImageInfo.history_key || computeHistoryKey(currentImageInfo));
+                } catch (err) {
+                    console.error("[UsgromanaGallery] Failed to rename file:", err);
+                    alert("Failed to rename file: " + (err.message || "Unknown error"));
+                    fileNameInput.value = filename || relpath || "";
+                }
+            }
+        };
+        fileNameValue.appendChild(fileNameInput);
+    } else {
+        fileNameValue.textContent = filename || relpath || "—";
+    }
+    
+    fileRow.appendChild(fileNameLabel);
+    fileRow.appendChild(fileNameValue);
+    metaContent.appendChild(fileRow);
     addRow("Modified", dateStr);
     addRow("Size", sizeStr);
     addRow("Folder", folder || "Unsorted");
@@ -701,6 +802,33 @@ async function fillMetadata(imgInfo, historyKey) {
     addRow("Model", model || model_name || "—");
     addRow("Sampler", sampler || "—");
     addRow("Prompt", (full_prompt || prompt || "—"));
+    
+    // NSFW indicator - check if image is marked as NSFW
+    try {
+        const savedMeta = await getSavedMeta(filename);
+        if (savedMeta.is_nsfw === true) {
+            const nsfwBadge = document.createElement("div");
+            Object.assign(nsfwBadge.style, {
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "4px",
+                padding: "2px 8px",
+                borderRadius: "4px",
+                background: "rgba(220,38,38,0.2)",
+                border: "1px solid rgba(220,38,38,0.6)",
+                color: "#fca5a5",
+                fontSize: "10px",
+                fontWeight: "600",
+                textTransform: "uppercase",
+                marginTop: "4px",
+                marginBottom: "8px",
+            });
+            nsfwBadge.textContent = "⚠️ NSFW";
+            metaContent.appendChild(nsfwBadge);
+        }
+    } catch (err) {
+        // Ignore errors checking NSFW status
+    }
 
     // Editable metadata (only if allowed)
     const editBox = document.createElement("div");
@@ -790,6 +918,78 @@ async function fillMetadata(imgInfo, historyKey) {
         persistMetadata();
     };
     editBox.appendChild(tagsInput);
+
+    // NSFW Mark Button (only if user can edit)
+    if (canEditMeta) {
+        const nsfwButtonRow = document.createElement("div");
+        Object.assign(nsfwButtonRow.style, {
+            display: "flex",
+            gap: "8px",
+            marginTop: "8px",
+            alignItems: "center",
+        });
+
+        const nsfwButton = document.createElement("button");
+        nsfwButton.textContent = "Mark as NSFW";
+        Object.assign(nsfwButton.style, {
+            padding: "6px 12px",
+            borderRadius: "8px",
+            border: "1px solid rgba(220,38,38,0.6)",
+            background: "rgba(220,38,38,0.2)",
+            color: "#fca5a5",
+            cursor: "pointer",
+            fontSize: "12px",
+            fontWeight: "500",
+            outline: "none",
+            transition: "all 0.2s ease",
+        });
+
+        nsfwButton.onmouseenter = () => {
+            nsfwButton.style.background = "rgba(220,38,38,0.35)";
+            nsfwButton.style.borderColor = "rgba(220,38,38,0.8)";
+        };
+        nsfwButton.onmouseleave = () => {
+            nsfwButton.style.background = "rgba(220,38,38,0.2)";
+            nsfwButton.style.borderColor = "rgba(220,38,38,0.6)";
+        };
+
+        nsfwButton.onclick = async () => {
+            if (!currentImageInfo || !currentImageInfo.filename) return;
+            
+            if (!confirm("Mark this image as NSFW? This will prevent unauthorized users from viewing it.")) {
+                return;
+            }
+
+            try {
+                nsfwButton.disabled = true;
+                nsfwButton.textContent = "Marking...";
+                await galleryApi.markAsNSFW(currentImageInfo.filename);
+                nsfwButton.textContent = "Marked as NSFW ✓";
+                nsfwButton.style.background = "rgba(34,197,94,0.2)";
+                nsfwButton.style.borderColor = "rgba(34,197,94,0.6)";
+                nsfwButton.style.color = "#86efac";
+                
+                // Clear cache so the image gets re-filtered
+                metaCache.delete(currentImageInfo.filename);
+                
+                setTimeout(() => {
+                    nsfwButton.textContent = "Mark as NSFW";
+                    nsfwButton.style.background = "rgba(220,38,38,0.2)";
+                    nsfwButton.style.borderColor = "rgba(220,38,38,0.6)";
+                    nsfwButton.style.color = "#fca5a5";
+                    nsfwButton.disabled = false;
+                }, 2000);
+            } catch (err) {
+                console.error("[UsgromanaGallery] Failed to mark image as NSFW:", err);
+                alert("Failed to mark image as NSFW: " + (err.message || "Unknown error"));
+                nsfwButton.textContent = "Mark as NSFW";
+                nsfwButton.disabled = false;
+            }
+        };
+
+        nsfwButtonRow.appendChild(nsfwButton);
+        editBox.appendChild(nsfwButtonRow);
+    }
 
     metaContent.appendChild(editBox);
 

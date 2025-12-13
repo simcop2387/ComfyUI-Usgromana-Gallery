@@ -84,4 +84,18 @@ export const galleryApi = {
         if (!res.ok) throw new Error(`Download failed: ${res.status}`);
         return await res.blob();
     },
+
+    async markAsNSFW(filename) {
+        return await request("/mark-nsfw", {
+            method: "POST",
+            body: JSON.stringify({ filename }),
+        });
+    },
+
+    async renameFile(oldFilename, newFilename) {
+        return await request("/rename", {
+            method: "POST",
+            body: JSON.stringify({ old_filename: oldFilename, new_filename: newFilename }),
+        });
+    },
 };
