@@ -1,3 +1,6 @@
+<p align="center">
+  <img src="./web/assets/Usgromana-Gallery.png" width="220" />
+</p>
 # ComfyUI-Usgromana-Gallery
 
 A comprehensive image gallery extension for ComfyUI that provides advanced image management, metadata editing, NSFW content filtering, real-time file monitoring, and a full-featured file explorer.
