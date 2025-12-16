@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./web/assets/Usgromana-Gallery.png" width="220" />
+  <img src="./web/assets/Dark_Usgromana-Gallery.png" width="220" />
 </p>
 # ComfyUI-Usgromana-Gallery
 
