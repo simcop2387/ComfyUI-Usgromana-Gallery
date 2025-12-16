@@ -1,11 +1,11 @@
 {
   "masonryLayout": true,
   "enableDrag": true,
-  "theme": "lightSubtle",
+  "theme": "dark",
   "showRatingInGrid": false,
   "thumbSize": "sm",
   "anchorToManagerBar": true,
-  "showDividers": true,
+  "showDividers": false,
   "dividerMode": "folder",
   "dividerStyle": "pill",
   "arrangeBy": "size",

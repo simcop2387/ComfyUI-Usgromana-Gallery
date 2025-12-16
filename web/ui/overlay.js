@@ -12,6 +12,7 @@ import {
 import { ASSETS } from "../core/constants.js";
 import { galleryApi } from "../core/api.js";
 import { subscribeTheme, getCurrentTheme } from "../core/themeManager.js";
+import { initWindowManager, createPinButton, updateTheme as updateWindowManagerTheme, getPinState } from "./windowManager.js";
 
 let overlayEl = null;
 let gridRootEl = null;
@@ -140,6 +141,10 @@ function ensureOverlay() {
     };
     rightHeader.appendChild(explorerToggleButton);
 
+    // Pin/Unpin button
+    const pinBtn = createPinButton();
+    rightHeader.appendChild(pinBtn);
+
     // Settings button
     const settingsButton = document.createElement("button");
     settingsButton.title = "Gallery settings";
@@ -233,6 +238,9 @@ function ensureOverlay() {
     document.body.appendChild(overlayEl);
     ensureOverlayStyles();
 
+    // Initialize window manager
+    initWindowManager(overlayEl, panel);
+
     // Init grid + explorer + details
     // Reset the gridHasSetVisibleImages flag on first overlay creation
     // This ensures images load properly when gallery is first opened
@@ -255,10 +263,12 @@ function ensureOverlay() {
     // Subscribe to theme changes to update overlay colors
     subscribeTheme((theme) => {
         applyThemeToOverlay(theme);
+        updateWindowManagerTheme(theme);
     });
     
     // Apply initial theme
     applyThemeToOverlay(getCurrentTheme());
+    updateWindowManagerTheme(getCurrentTheme());
 
     initialized = true;
     return overlayEl;
@@ -304,7 +314,7 @@ function openSettingsModal(panel) {
     if (!settingsModalEl) {
         settingsModalEl = document.createElement("div");
         Object.assign(settingsModalEl.style, {
-            position: "absolute",
+            position: "fixed",
             top: "50%",
             left: "50%",
             transform: "translate(-50%, -50%)",
@@ -312,11 +322,24 @@ function openSettingsModal(panel) {
             borderRadius: "12px",
             border: `1px solid ${theme.settingsBorder}`,
             boxShadow: `0 18px 40px ${theme.modalShadow}`,
-            padding: "14px 18px",
+            padding: "0",
             minWidth: "260px",
             maxWidth: "380px",
             color: theme.textPrimary,
             zIndex: "20000",
+            display: "flex",
+            flexDirection: "column",
+        });
+
+        // Header with title and close button (for dragging)
+        const header = document.createElement("div");
+        Object.assign(header.style, {
+            padding: "10px 14px 8px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            cursor: "move",
+            borderBottom: `1px solid ${theme.settingsBorder}`,
         });
 
         const title = document.createElement("div");
@@ -324,9 +347,27 @@ function openSettingsModal(panel) {
         Object.assign(title.style, {
             fontSize: "13px",
             fontWeight: "600",
-            marginBottom: "4px",
         });
-        settingsModalEl.appendChild(title);
+        
+        const closeBtn = document.createElement("button");
+        closeBtn.textContent = "✕";
+        Object.assign(closeBtn.style, {
+            borderRadius: "999px",
+            border: `1px solid ${theme.buttonBorder}`,
+            width: "20px",
+            height: "20px",
+            fontSize: "11px",
+            cursor: "pointer",
+            background: theme.buttonBackgroundHover,
+            color: theme.buttonText,
+        });
+        closeBtn.onclick = () => {
+            settingsModalEl.style.display = "none";
+        };
+
+        header.appendChild(title);
+        header.appendChild(closeBtn);
+        settingsModalEl.appendChild(header);
 
         const form = document.createElement("div");
         Object.assign(form.style, {
@@ -334,6 +375,7 @@ function openSettingsModal(panel) {
             flexDirection: "column",
             gap: "8px",
             fontSize: "12px",
+            padding: "14px 18px",
         });
 
         const addToggle = (labelText, key) => {
@@ -594,31 +636,11 @@ function openSettingsModal(panel) {
 
         settingsModalEl.appendChild(form);
 
-        const footer = document.createElement("div");
-        Object.assign(footer.style, {
-            marginTop: "10px",
-            display: "flex",
-            justifyContent: "flex-end",
-        });
-
-        const closeBtn = document.createElement("button");
-        closeBtn.textContent = "Close";
-        Object.assign(closeBtn.style, {
-            borderRadius: "999px",
-            border: "1px solid rgba(148,163,184,0.55)",
-            padding: "3px 10px",
-            fontSize: "11px",
-            cursor: "pointer",
-            background: "rgba(15,23,42,0.85)",
-            color: "#e5e7eb",
-        });
-        closeBtn.onclick = () => {
-            settingsModalEl.style.display = "none";
-        };
-        footer.appendChild(closeBtn);
-        settingsModalEl.appendChild(footer);
-
-        panel.appendChild(settingsModalEl);
+        // Make settings modal draggable
+        makePanelDraggable(settingsModalEl, header);
+        
+        // Append to body instead of panel so it works when unpinned
+        document.body.appendChild(settingsModalEl);
     }
 
     settingsModalEl.style.display = "block";
@@ -975,9 +997,9 @@ function openFilterPanel() {
             top: "90px",
             right: "40px",
             width: "280px",
-            background: theme.filterBackground,
+            background: theme.settingsBackground,
             borderRadius: "14px",
-            border: `1px solid ${theme.filterBorder}`,
+            border: `1px solid ${theme.settingsBorder}`,
             boxShadow: `0 18px 50px ${theme.modalShadow}`,
             color: theme.textPrimary,
             zIndex: "20010",
@@ -993,7 +1015,7 @@ function openFilterPanel() {
             alignItems: "center",
             justifyContent: "space-between",
             cursor: "move",
-            borderBottom: "1px solid rgba(51,65,85,0.8)",
+            borderBottom: `1px solid ${theme.settingsBorder}`,
         });
 
         const title = document.createElement("span");
@@ -1337,20 +1359,44 @@ function makePanelDraggable(panel, handle) {
     let dragState = null;
 
     handle.addEventListener("mousedown", (ev) => {
+        // Don't drag if clicking on buttons or interactive elements
+        if (ev.target.tagName === "BUTTON" || 
+            ev.target.closest("button") || 
+            ev.target.tagName === "INPUT" ||
+            ev.target.closest("input") ||
+            ev.target.tagName === "SELECT" ||
+            ev.target.closest("select")) {
+            return;
+        }
+
         const rect = panel.getBoundingClientRect();
+        
+        // Calculate offset from click position to panel top-left corner
         dragState = {
             offsetX: ev.clientX - rect.left,
             offsetY: ev.clientY - rect.top,
         };
+        
+        // Set initial position and remove any transform
         panel.style.left = rect.left + "px";
         panel.style.top = rect.top + "px";
         panel.style.right = "auto";
+        panel.style.transform = "none"; // Remove transform that might be used for centering
 
         const onMove = (e) => {
             if (!dragState) return;
-            panel.style.left = e.clientX - dragState.offsetX + "px";
-            panel.style.top = e.clientY - dragState.offsetY + "px";
+            // Position panel so the click point stays under the cursor
+            const newLeft = e.clientX - dragState.offsetX;
+            const newTop = e.clientY - dragState.offsetY;
+            
+            // Keep panel within viewport bounds
+            const maxX = window.innerWidth - panel.offsetWidth;
+            const maxY = window.innerHeight - panel.offsetHeight;
+            
+            panel.style.left = `${Math.max(0, Math.min(newLeft, maxX))}px`;
+            panel.style.top = `${Math.max(0, Math.min(newTop, maxY))}px`;
         };
+        
         const onUp = () => {
             dragState = null;
             document.removeEventListener("mousemove", onMove);
@@ -1360,6 +1406,7 @@ function makePanelDraggable(panel, handle) {
         document.addEventListener("mousemove", onMove);
         document.addEventListener("mouseup", onUp);
         ev.preventDefault();
+        ev.stopPropagation();
     });
 }
 
@@ -1393,8 +1440,9 @@ function ensureOverlayStyles() {
 function applyThemeToOverlay(theme) {
     if (!overlayEl) return;
     
-    // Update overlay background
-    overlayEl.style.background = theme.overlayBackground;
+    // Update overlay background - only show backdrop if pinned
+    const isPinned = getPinState();
+    overlayEl.style.background = isPinned ? theme.overlayBackground : "transparent";
     
     // Update panel
     const panel = overlayEl.querySelector('.usg-gallery-panel');
@@ -1470,8 +1518,8 @@ function applyThemeToOverlay(theme) {
     
     // Update filter panel if it exists
     if (filterPanelEl) {
-        filterPanelEl.style.background = theme.filterBackground;
-        filterPanelEl.style.border = `1px solid ${theme.filterBorder}`;
+        filterPanelEl.style.background = theme.settingsBackground;
+        filterPanelEl.style.border = `1px solid ${theme.settingsBorder}`;
         filterPanelEl.style.boxShadow = `0 18px 50px ${theme.modalShadow}`;
         filterPanelEl.style.color = theme.textPrimary;
         
@@ -1480,6 +1528,11 @@ function applyThemeToOverlay(theme) {
             closeBtn.style.border = `1px solid ${theme.buttonBorder}`;
             closeBtn.style.background = theme.buttonBackgroundHover;
             closeBtn.style.color = theme.buttonText;
+        }
+        
+        const header = filterPanelEl.querySelector('div[style*="cursor: move"]');
+        if (header) {
+            header.style.borderBottom = `1px solid ${theme.settingsBorder}`;
         }
     }
 }

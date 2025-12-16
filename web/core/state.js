@@ -48,10 +48,6 @@ export function setImages(images, resetVisible = false) {
     state.images = Array.isArray(images) ? images : [];
     const newCount = state.images.length;
     
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'state.js:48',message:'setImages called',data:{prevCount,newCount,countChanged:prevCount!==newCount,resetVisible,imagesAreSameRef:prevImages===state.images},timestamp:Date.now(),sessionId:'debug-session',runId:'run4',hypothesisId:'CG'})}).catch(()=>{});
-    // #endregion
-    
     // Only reset visibleImages if:
     // 1. Explicitly requested AND grid hasn't set it yet, OR
     // 2. visibleImages is empty (initial load)
@@ -72,9 +68,6 @@ export function setImages(images, resetVisible = false) {
         }
     }
 
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'state.js:68',message:'Calling notify()',data:{listenerCount:listeners.size},timestamp:Date.now(),sessionId:'debug-session',runId:'run4',hypothesisId:'CH'})}).catch(()=>{});
-    // #endregion
     notify();
 }
 

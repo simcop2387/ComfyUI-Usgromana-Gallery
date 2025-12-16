@@ -265,9 +265,6 @@ export async function reloadImagesAndRender() {
         });
     } catch (err) {
         console.warn("[USG-Gallery] Failed to reload images:", err);
-        // #region agent log
-        fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:165',message:'reloadImagesAndRender error',data:{error:err.message},timestamp:Date.now(),sessionId:'debug-session',runId:'run3',hypothesisId:'W'})}).catch(()=>{});
-        // #endregion
         // fallback: at least render whatever state we already had
         renderGridContent();
         hideLoadingIndicator();
@@ -1328,9 +1325,6 @@ function createCard(img, index) {
     } else {
         // Fallback for browsers without IntersectionObserver - load immediately
         imageLoadProgress.visible++;
-        // #region agent log
-        fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:1088',message:'No IntersectionObserver, setting src immediately',data:{imageName,thumbUrl,visible:imageLoadProgress.visible},timestamp:Date.now(),sessionId:'debug-session',runId:'run3',hypothesisId:'S'})}).catch(()=>{});
-        // #endregion
         imgEl.src = thumbUrl;
         updateLoadingProgress(
             imageLoadProgress.loaded,
@@ -1351,10 +1345,7 @@ function createCard(img, index) {
             });
         }
         
-        // #region agent log
         const imageSize = img.file_size || img.size || 0;
-        fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:1200',message:'Image loaded',data:{imageName,loadTime,imageSize,loaded:imageLoadProgress.loaded,visible:imageLoadProgress.visible,total:imageLoadProgress.total},timestamp:Date.now(),sessionId:'debug-session',runId:'run4',hypothesisId:'I'})}).catch(()=>{});
-        // #endregion
         
         // Use requestAnimationFrame to avoid blocking main thread
         requestAnimationFrame(() => {
@@ -1407,9 +1398,6 @@ function createCard(img, index) {
     
     imgEl.onerror = () => {
         imageLoadProgress.failed++;
-        // #region agent log
-        fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:1092',message:'Image load error',data:{imageName,thumbUrl,failed:imageLoadProgress.failed},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'J'})}).catch(()=>{});
-        // #endregion
         updateLoadingProgress(
             imageLoadProgress.loaded,
             imageLoadProgress.total,
