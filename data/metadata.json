@@ -156,5 +156,17 @@
     "folder": "SavesAI",
     "prompt": null,
     "history_key": null
+  },
+  "2339fc4b-6588-4769-81eb-876276ae70ad/Batman!.png": {
+    "tags": [
+      "Comic",
+      "art",
+      "JimLee"
+    ],
+    "display_name": null,
+    "rating": 5,
+    "folder": "2339fc4b-6588-4769-81eb-876276ae70ad",
+    "prompt": null,
+    "history_key": null
   }
 }

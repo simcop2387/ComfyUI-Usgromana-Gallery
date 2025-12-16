@@ -11,7 +11,7 @@ import {
     getImages,
     resetGridHasSetVisibleImagesFlag,
 } from "../core/state.js";
-import { showDetailsForIndex } from "./details.js";
+import { showDetailsForIndex, clearFolderFilter } from "./details.js";
 import {
     getGallerySettings,
     subscribeGallerySettings,
@@ -158,9 +158,6 @@ export function clearGridThumbnails() {
  *  - push into core state (which will trigger render via subscribe)
  */
 export async function reloadImagesAndRender() {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:135',message:'reloadImagesAndRender start',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run3',hypothesisId:'U'})}).catch(()=>{});
-    // #endregion
     
     clearGridThumbnails();
     
@@ -177,9 +174,6 @@ export async function reloadImagesAndRender() {
     try {
         const images = await galleryApi.listImages();
         
-        // #region agent log
-        fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:151',message:'Images fetched from API',data:{imageCount:images.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run3',hypothesisId:'V'})}).catch(()=>{});
-        // #endregion
         
         // On manual refresh, reset the flag so setImages can reset visibleImages
         // This allows grid to re-apply filters/sort from scratch
@@ -440,9 +434,6 @@ export function initGrid(root) {
         const prevCount = lastImageCount;
         const newCount = newImages?.length || 0;
 
-        // #region agent log
-        fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:433',message:'Grid subscription fired',data:{prevImageCount:prevCount,newImageCount:newCount,lastImageCount,prevImagesRef:prevImages,newImagesRef:newImages,imagesAreSameRef:prevImages===newImages,lastStateIsState:lastState===state},timestamp:Date.now(),sessionId:'debug-session',runId:'run4',hypothesisId:'CJ'})}).catch(()=>{});
-        // #endregion
 
         // Update tracking variables AFTER capturing previous values
         lastState = state;
@@ -462,15 +453,9 @@ export function initGrid(root) {
         // 3. Grid is empty
         // 4. Count decreased (force re-render on deletion even if count appears same due to timing)
         if (!isEmpty && sameReference && !countChanged && !countDecreased) {
-            // #region agent log
-            fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:454',message:'Skipping re-render - same image reference and count',data:{prevImageCount:prevCount,newImageCount:newCount,countDecreased},timestamp:Date.now(),sessionId:'debug-session',runId:'run4',hypothesisId:'CK'})}).catch(()=>{});
-            // #endregion
             return;
         }
 
-        // #region agent log
-        fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:462',message:'State changed, re-rendering grid',data:{prevImageCount:prevCount,newImageCount:newCount,isEmpty,countChanged,countDecreased,sameReference},timestamp:Date.now(),sessionId:'debug-session',runId:'run4',hypothesisId:'CE'})}).catch(()=>{});
-        // #endregion
         renderGridContent();
     });
 }
@@ -792,9 +777,6 @@ function createLoadingIndicator() {
         if (!scrollContainer.contains(loadingIndicatorEl)) {
             scrollContainer.appendChild(loadingIndicatorEl);
         }
-        // #region agent log
-        fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:717',message:'Loading indicator created and appended',data:{parentElement:scrollContainer.className,hasIndicator:scrollContainer.contains(loadingIndicatorEl)},timestamp:Date.now(),sessionId:'debug-session',runId:'run3',hypothesisId:'N'})}).catch(()=>{});
-        // #endregion
     }
 }
 
@@ -862,9 +844,6 @@ function showLoadingIndicator() {
         }
         loadingIndicatorEl.style.display = "flex";
         imageLoadProgress.startTime = Date.now();
-        // #region agent log
-        fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:770',message:'showLoadingIndicator called',data:{hasIndicator:!!loadingIndicatorEl,display:loadingIndicatorEl.style.display,hasParent:!!loadingIndicatorEl.parentElement},timestamp:Date.now(),sessionId:'debug-session',runId:'run3',hypothesisId:'R'})}).catch(()=>{});
-        // #endregion
     }
 }
 
@@ -873,9 +852,6 @@ function hideLoadingIndicator() {
         loadingIndicatorEl.style.display = "none";
         // Don't reset progress completely - keep totals for reference
         imageLoadProgress.currentImage = null;
-        // #region agent log
-        fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:780',message:'Loading indicator hidden',data:{loaded:imageLoadProgress.loaded,visible:imageLoadProgress.visible,total:imageLoadProgress.total},timestamp:Date.now(),sessionId:'debug-session',runId:'run3',hypothesisId:'T'})}).catch(()=>{});
-        // #endregion
     }
 }
 
@@ -887,17 +863,11 @@ function hideLoadingIndicator() {
 function renderGridContent() {
     if (!gridContentEl) return;
 
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:792',message:'renderGridContent start',data:{gridContentElExists:!!gridContentEl,loadingIndicatorExists:!!loadingIndicatorEl},timestamp:Date.now(),sessionId:'debug-session',runId:'run3',hypothesisId:'K'})}).catch(()=>{});
-    // #endregion
     
     // Clear grid content but preserve loading indicator (it's in parent)
     gridContentEl.innerHTML = "";
     const allImages = getAllImagesRaw();
     
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:797',message:'Grid cleared, images count',data:{allImagesCount:allImages.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run3',hypothesisId:'K'})}).catch(()=>{});
-    // #endregion
 
     let filtered = allImages.filter((img) => {
         const rating = getRatingForImage(img);
@@ -998,9 +968,6 @@ function renderGridContent() {
     // Set a safety timeout to hide loading indicator if it gets stuck
     // This prevents the loading bar from freezing indefinitely
     imageLoadProgress.progressTimeout = setTimeout(() => {
-        // #region agent log
-        fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:895',message:'Progress timeout - forcing hide',data:{loaded:imageLoadProgress.loaded,visible:imageLoadProgress.visible,total:imageLoadProgress.total},timestamp:Date.now(),sessionId:'debug-session',runId:'run3',hypothesisId:'X'})}).catch(()=>{});
-        // #endregion
         if (imageLoadProgress.loaded > 0) {
             // If some images loaded, hide the indicator (they'll continue loading in background)
             hideLoadingIndicator();
@@ -1008,9 +975,6 @@ function renderGridContent() {
         imageLoadProgress.progressTimeout = null;
     }, 10000); // 10 second timeout
     
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:886',message:'Initializing progress tracking',data:{flatListLength:flatList.length,previousLoaded:imageLoadProgress.loaded},timestamp:Date.now(),sessionId:'debug-session',runId:'run3',hypothesisId:'L'})}).catch(()=>{});
-    // #endregion
     
     if (flatList.length > 0) {
         // Ensure loading indicator exists and is visible
@@ -1019,9 +983,6 @@ function renderGridContent() {
         }
         showLoadingIndicator();
         updateLoadingProgress(0, flatList.length, null, `Ready to load ${flatList.length} images (scroll to load more)...`);
-        // #region agent log
-        fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:900',message:'Loading indicator shown',data:{loadingIndicatorExists:!!loadingIndicatorEl,display:loadingIndicatorEl?.style.display},timestamp:Date.now(),sessionId:'debug-session',runId:'run3',hypothesisId:'M'})}).catch(()=>{});
-        // #endregion
     } else {
         hideLoadingIndicator();
     }
@@ -1084,10 +1045,6 @@ function renderGridContent() {
                 gridContentEl.appendChild(card);
                 index++;
                 // #region agent log
-                if (index <= 5 || index % 10 === 0) { // Log first 5 and every 10th
-                    fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:950',message:'Card created and appended',data:{index,imageName:img.filename||img.relpath,gridContentElChildren:gridContentEl.children.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run3',hypothesisId:'O'})}).catch(()=>{});
-                }
-                // #endregion
             });
         });
     }
@@ -1188,9 +1145,6 @@ function createCard(img, index) {
         })();
 
     // #region agent log
-    if (index < 5 || index % 20 === 0) { // Log first 5 and every 20th
-        fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:1133',message:'Thumbnail URL generated',data:{imageName:img.filename||img.relpath,relpath:img.relpath,thumbUrl,imageKey,hasThumbUrl:!!img.thumb_url},timestamp:Date.now(),sessionId:'debug-session',runId:'run4',hypothesisId:'AC'})}).catch(()=>{});
-    }
     // #endregion
 
     // 🔹 Register thumbnail so Details & History can reuse it
@@ -1231,9 +1185,6 @@ function createCard(img, index) {
     const imageName = img.filename || img.relpath || "Unknown";
     const loadStartTime = Date.now();
     
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:972',message:'Image load start',data:{imageName,thumbUrl,index},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
     
     // Track this image element
     imageLoadProgress.imageElements.set(imageName, imgEl);
@@ -1245,9 +1196,6 @@ function createCard(img, index) {
                 if (entry.isIntersecting) {
                     if (!imgEl.src) {
                         imageLoadProgress.visible++;
-                        // #region agent log
-                        fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:1055',message:'Image intersecting, setting src',data:{imageName,thumbUrl,isIntersecting:entry.isIntersecting,intersectionRatio:entry.intersectionRatio,visible:imageLoadProgress.visible},timestamp:Date.now(),sessionId:'debug-session',runId:'run3',hypothesisId:'P'})}).catch(()=>{});
-                        // #endregion
                         imgEl.src = thumbUrl;
                         updateLoadingProgress(
                             imageLoadProgress.loaded,
@@ -1278,9 +1226,6 @@ function createCard(img, index) {
         observer.observe(imgEl);
         
         // #region agent log
-        if (index < 5) { // Log first few
-            fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:1080',message:'IntersectionObserver created and attached',data:{imageName,index,hasObserver:!!imgEl._intersectionObserver},timestamp:Date.now(),sessionId:'debug-session',runId:'run3',hypothesisId:'Q'})}).catch(()=>{});
-        }
         // #endregion
     } else {
         // Fallback for browsers without IntersectionObserver - load immediately
@@ -1427,10 +1372,16 @@ function createCard(img, index) {
         card.draggable = true;
         card.addEventListener("dragstart", (ev) => {
             try {
+                // Build image URL - prefer relpath for accuracy
+                const rel = img.relpath || img.filename || "";
+                const imageUrl = img.url || 
+                    (rel ? `${API_ENDPOINTS.IMAGE}?filename=${encodeURIComponent(rel)}` : thumbUrl);
+                
                 const payload = {
                     type: "usgromana-image",
                     filename: img.filename,
-                    url: img.url || thumbUrl,
+                    relpath: img.relpath || img.filename, // Include relpath for proper image loading
+                    url: imageUrl,
                     workflow_id: img.workflow_id || null,
                     model: img.model || img.model_name || null,
                     prompt: img.prompt || img.full_prompt || null,
@@ -1439,7 +1390,16 @@ function createCard(img, index) {
                 ev.dataTransfer.setData("application/json+usgromana-image", json);
                 ev.dataTransfer.setData("application/json", json);
                 ev.dataTransfer.setData("text/plain", json);
-                ev.dataTransfer.effectAllowed = "copyMove";
+                ev.dataTransfer.effectAllowed = "copy";
+                
+                // Also set a drag image (optional - shows preview while dragging)
+                if (imgEl && imgEl.complete) {
+                    try {
+                        ev.dataTransfer.setDragImage(imgEl, imgEl.width / 2, imgEl.height / 2);
+                    } catch (e) {
+                        // setDragImage might fail in some browsers, ignore
+                    }
+                }
             } catch (err) {
                 console.warn("[UsgromanaGallery] Drag payload error:", err);
             }
@@ -1468,6 +1428,8 @@ function createCard(img, index) {
         fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'grid.js:1250',message:'Card clicked, opening details',data:{index:finalIndex,imageName:img.filename||img.relpath,relpath:img.relpath,thumbUrl,imageUrl:img.url},timestamp:Date.now(),sessionId:'debug-session',runId:'run4',hypothesisId:'AD'})}).catch(()=>{});
         // #endregion
         
+        // Clear folder filter when opening from grid (show all images)
+        clearFolderFilter();
         setSelectedIndex(finalIndex);
         showDetailsForIndex(finalIndex);
     });

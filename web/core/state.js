@@ -24,9 +24,6 @@ export function subscribe(fn) {
 }
 
 function notify() {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'state.js:26',message:'notify() called',data:{listenerCount:listeners.size,imageCount:state.images.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run4',hypothesisId:'CI'})}).catch(()=>{});
-    // #endregion
     for (const fn of listeners) {
         try { fn(state); } catch (e) { console.warn("[Gallery] listener error:", e); }
     }

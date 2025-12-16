@@ -44,6 +44,9 @@ let metadataVisible = false;
 let leftTargetIndex = null;
 let rightTargetIndex = null;
 
+// Folder context for navigation (when opened from explorer)
+let folderFilter = null; // null = all images, string = folder path to filter by
+
 // Navigation sequence counter to prevent race conditions from concurrent showDetailsForIndex calls
 let detailsNavSeq = 0;
 
@@ -380,16 +383,92 @@ function createSideTile(side) {
     return tile;
 }
 
-function navigateRelative(delta) {
+function getFilteredImages() {
     const items = getImages();
-    if (!items.length) {
+    if (!folderFilter) {
+        return items; // No filter, return all images
+    }
+    
+    // Filter images to only those in the current folder
+    return items.filter(img => {
+        const imgFolder = img.folder || "";
+        const relpath = img.relpath || "";
+        
+        if (folderFilter === "") {
+            // Root folder - images with no folder or empty folder
+            // Check if relpath has no folder separator (is in root)
+            if (imgFolder === "") {
+                return true;
+            }
+            // Also check if relpath has no "/" (root level file)
+            return !relpath.includes("/");
+        }
+        
+        // Normalize folder paths for comparison (handle both "/" and "\" separators)
+        const normalizePath = (path) => path.replace(/\\/g, "/").replace(/\/+/g, "/");
+        const normalizedFilter = normalizePath(folderFilter);
+        const normalizedImgFolder = normalizePath(imgFolder);
+        const normalizedRelpath = normalizePath(relpath);
+        
+        // Match exact folder
+        if (normalizedImgFolder === normalizedFilter) {
+            return true;
+        }
+        
+        // Check if relpath starts with folder path (for subfolder files)
+        if (normalizedRelpath.startsWith(normalizedFilter + "/")) {
+            return true;
+        }
+        
+        // Check if relpath matches folder exactly (folder itself as a file, though unlikely)
+        if (normalizedRelpath === normalizedFilter) {
+            return true;
+        }
+        
+        // Extract folder from relpath and compare
+        const relpathFolder = normalizedRelpath.includes("/") 
+            ? normalizedRelpath.substring(0, normalizedRelpath.lastIndexOf("/"))
+            : "";
+        
+        return relpathFolder === normalizedFilter;
+    });
+}
+
+function navigateRelative(delta) {
+    const allItems = getImages();
+    const filteredItems = getFilteredImages();
+    
+    if (!filteredItems.length) {
         return;
     }
-    const len = items.length;
-
-    const nextIndex = currentIndex == null ? 0 : ((currentIndex + delta) % len + len) % len;
     
-    showDetailsForIndex(nextIndex);
+    // Find current image in filtered list
+    let filteredIndex = -1;
+    if (currentIndex != null && currentIndex < allItems.length) {
+        const currentImg = allItems[currentIndex];
+        filteredIndex = filteredItems.findIndex(img => 
+            (img.relpath && currentImg.relpath && img.relpath === currentImg.relpath) ||
+            (img.filename && currentImg.filename && img.filename === currentImg.filename)
+        );
+    }
+    
+    if (filteredIndex < 0) {
+        filteredIndex = 0; // Fallback to first image if current not found
+    }
+    
+    const len = filteredItems.length;
+    const nextFilteredIndex = ((filteredIndex + delta) % len + len) % len;
+    const nextImage = filteredItems[nextFilteredIndex];
+    
+    // Find the index of this image in the full list
+    const nextIndex = allItems.findIndex(img =>
+        (img.relpath && nextImage.relpath && img.relpath === nextImage.relpath) ||
+        (img.filename && nextImage.filename && img.filename === nextImage.filename)
+    );
+    
+    if (nextIndex >= 0) {
+        showDetailsForIndex(nextIndex);
+    }
 }
 
 function resizeCardToImage() {
@@ -398,7 +477,14 @@ function resizeCardToImage() {
     const natW = imgEl.naturalWidth || 512;
     const natH = imgEl.naturalHeight || 512;
 
-    const maxW = window.innerWidth * 0.8;
+    // Account for metadata panel if visible
+    let maxW = window.innerWidth * 0.8;
+    if (metadataVisible) {
+        const panelWidth = 340;
+        const gap = 20;
+        maxW = window.innerWidth - panelWidth - gap - 40; // Leave room for panel
+    }
+
     const maxH = window.innerHeight * 0.8;
 
     const paddingW = 10 * 2 + 8 * 2;
@@ -413,6 +499,14 @@ function resizeCardToImage() {
 
     cardEl.style.width = `${Math.round(imgDisplayW + paddingW)}px`;
     cardEl.style.height = `${Math.round(imgDisplayH + paddingH)}px`;
+    
+    // Update metadata panel position after card resizes (if metadata is visible)
+    if (metadataVisible && metaPanel) {
+        // Use a small delay to ensure layout has updated
+        setTimeout(() => {
+            updateMetadataPanelPosition();
+        }, 50);
+    }
 }
 
 // --------------------------
@@ -671,6 +765,16 @@ export async function showDetailsForIndex(index) {
         requestAnimationFrame(() => {
             resizeCardToImage();
             fillMetadata(imgInfo);
+            // Update metadata panel position if it's visible (after card resizes)
+            // Use a small delay to ensure card has finished resizing
+            if (metadataVisible && metaPanel) {
+                // Use double requestAnimationFrame to ensure layout is complete
+                requestAnimationFrame(() => {
+                    requestAnimationFrame(() => {
+                        updateMetadataPanelPosition();
+                    });
+                });
+            }
         });
     };
 
@@ -860,14 +964,57 @@ export async function showDetailsForIndex(index) {
     }, delayAfterSrcClear); // Delay longer if src was cleared
 
     // PREV/NEXT: thumbnails only, from state registry or existing thumb_url only.
-    // Use the SAME items array that was used to calculate currentIndex
-    const prevIndex = (currentIndex - 1 + len) % len;
-    const nextIndex = (currentIndex + 1) % len;
-    const prev = items[prevIndex];
-    const next = items[nextIndex];
+    // Calculate prev/next indices - use filtered images if folder filter is active
+    let prevIndex, nextIndex, prev, next;
+    
+    if (folderFilter) {
+        // Use filtered images for navigation
+        const filteredItems = getFilteredImages();
+        if (filteredItems.length > 0) {
+            // Find current image in filtered list
+            let filteredCurrentIndex = filteredItems.findIndex(img =>
+                (img.relpath && imgInfo.relpath && img.relpath === imgInfo.relpath) ||
+                (img.filename && imgInfo.filename && img.filename === imgInfo.filename)
+            );
+            
+            if (filteredCurrentIndex < 0) {
+                filteredCurrentIndex = 0;
+            }
+            
+            const filteredLen = filteredItems.length;
+            // Wrap around - if only one image, prev and next both point to it
+            const prevFilteredIndex = filteredLen > 0 ? (filteredCurrentIndex - 1 + filteredLen) % filteredLen : 0;
+            const nextFilteredIndex = filteredLen > 0 ? (filteredCurrentIndex + 1) % filteredLen : 0;
+            
+            prev = filteredItems[prevFilteredIndex];
+            next = filteredItems[nextFilteredIndex];
+            
+            // Find indices in full list
+            prevIndex = prev ? items.findIndex(img =>
+                (img.relpath && prev.relpath && img.relpath === prev.relpath) ||
+                (img.filename && prev.filename && img.filename === prev.filename)
+            ) : -1;
+            
+            nextIndex = next ? items.findIndex(img =>
+                (img.relpath && next.relpath && img.relpath === next.relpath) ||
+                (img.filename && next.filename && img.filename === next.filename)
+            ) : -1;
+        } else {
+            prevIndex = -1;
+            nextIndex = -1;
+            prev = null;
+            next = null;
+        }
+    } else {
+        // No filter - use all images
+        prevIndex = (currentIndex - 1 + len) % len;
+        nextIndex = (currentIndex + 1) % len;
+        prev = items[prevIndex];
+        next = items[nextIndex];
+    }
 
-    leftTargetIndex = prevIndex;
-    rightTargetIndex = nextIndex;
+    leftTargetIndex = prevIndex >= 0 ? prevIndex : null;
+    rightTargetIndex = nextIndex >= 0 ? nextIndex : null;
 
     // Generate thumbnail URLs directly from image data to ensure correctness
     // Don't rely on registry which may have stale/incorrect mappings
@@ -896,20 +1043,40 @@ export async function showDetailsForIndex(index) {
         }
     }
 
-    if (leftTileImg) {
-        if (prevThumb) {
-            leftTileImg.src = prevThumb;
+    // Update left/right tiles with proper visibility
+    if (leftTile) {
+        if (prevThumb && leftTargetIndex != null) {
+            if (leftTileImg) {
+                leftTileImg.src = prevThumb;
+            }
+            leftTile.style.opacity = "1";
+            leftTile.style.pointerEvents = "auto";
         } else {
-            leftTileImg.src = "";
-            leftTileImg.removeAttribute("src");
+            if (leftTileImg) {
+                leftTileImg.src = "";
+                leftTileImg.removeAttribute("src");
+            }
+            // Keep tiles visible even with one image (they'll wrap to the same image)
+            leftTile.style.opacity = "1";
+            leftTile.style.pointerEvents = "auto";
         }
     }
-    if (rightTileImg) {
-        if (nextThumb) {
-            rightTileImg.src = nextThumb;
+    
+    if (rightTile) {
+        if (nextThumb && rightTargetIndex != null) {
+            if (rightTileImg) {
+                rightTileImg.src = nextThumb;
+            }
+            rightTile.style.opacity = "1";
+            rightTile.style.pointerEvents = "auto";
         } else {
-            rightTileImg.src = "";
-            rightTileImg.removeAttribute("src");
+            if (rightTileImg) {
+                rightTileImg.src = "";
+                rightTileImg.removeAttribute("src");
+            }
+            // Keep tiles visible even with one image (they'll wrap to the same image)
+            rightTile.style.opacity = "1";
+            rightTile.style.pointerEvents = "auto";
         }
     }
 
@@ -923,8 +1090,18 @@ export async function showDetailsForIndex(index) {
     }
 }
 
+export function setFolderFilter(folderPath) {
+    folderFilter = folderPath;
+}
+
+export function clearFolderFilter() {
+    folderFilter = null;
+}
+
 export function hideDetails() {
     if (!modalEl) return;
+    // Clear folder filter when hiding details
+    folderFilter = null;
 
     // persistent overlay: do NOT remove from DOM
     modalEl.style.display = "none";
@@ -979,6 +1156,44 @@ export function hideDetails() {
 // --------------------------
 // Metadata panel
 // --------------------------
+
+function updateMetadataPanelPosition() {
+    if (!metaPanel || !cardEl || !metadataVisible) return;
+    
+    const cardRect = cardEl.getBoundingClientRect();
+    const panelWidth = 340;
+    const gap = 20;
+    const panelLeft = cardRect.right + gap;
+    
+    // Ensure panel doesn't go off-screen
+    const viewportWidth = window.innerWidth;
+    const maxLeft = viewportWidth - panelWidth - 10; // 10px padding from edge
+    const finalLeft = Math.min(panelLeft, maxLeft);
+    
+    // Position panel fixed relative to viewport, next to card's right edge
+    Object.assign(metaPanel.style, {
+        position: "fixed",
+        left: `${finalLeft}px`,
+        right: "auto", // Override right: 0
+        top: "50%",
+        transform: "translateY(-50%)",
+        height: "90vh",
+        maxHeight: "90vh",
+        width: `${panelWidth}px`,
+        zIndex: "20001",
+        transition: "left 0.2s ease", // Smooth transition
+    });
+    
+    // Also update image max width dynamically to prevent overlap
+    if (imgEl) {
+        const availableWidth = Math.max(300, finalLeft - 40); // Ensure minimum width
+        Object.assign(imgEl.style, {
+            maxWidth: `${availableWidth}px`,
+            transition: "max-width 0.2s ease",
+        });
+    }
+}
+
 function toggleMetadata() {
     metadataVisible = !metadataVisible;
 
@@ -1011,27 +1226,7 @@ function toggleMetadata() {
                 metaPanel.style.display = "flex";
             }
             
-            // Function to update panel position based on card's right edge
-            const updatePanelPosition = () => {
-                const cardRect = cardEl.getBoundingClientRect();
-                const panelWidth = 340;
-                const gap = 20;
-                const panelLeft = cardRect.right + gap;
-                
-                // Position panel fixed relative to viewport, next to card's right edge
-                Object.assign(metaPanel.style, {
-                    position: "fixed",
-                    left: `${panelLeft}px`,
-                    right: "auto", // Override right: 0
-                    top: "50%",
-                    transform: "translateY(-50%)",
-                    height: "90vh",
-                    maxHeight: "90vh",
-                    width: `${panelWidth}px`,
-                    zIndex: "20001",
-                    transition: "left 0.3s ease", // Match card's transition duration
-                });
-            };
+            // Use the global updateMetadataPanelPosition function
             
             // Get current panel position (at right: 0, viewport edge)
             const currentPanelRect = metaPanel.getBoundingClientRect();
@@ -1051,26 +1246,23 @@ function toggleMetadata() {
             // Wait for card transition to complete, THEN calculate and transition panel position
             // This ensures we use the actual final card position, not a predicted one
             setTimeout(() => {
-                // Get the ACTUAL final card position after transition
-                const finalCardRect = cardEl.getBoundingClientRect();
-                const finalPanelLeft = finalCardRect.right + gap;
-                
-                // Now transition to final position smoothly
-                Object.assign(metaPanel.style, {
-                    left: `${finalPanelLeft}px`,
-                    transition: "left 0.3s ease", // Smooth transition
-                });
+                updateMetadataPanelPosition();
             }, 350); // Wait for card's margin transition (0.3s) to complete first
             
             // Store update function for resize handler
             if (!window._galleryPanelUpdatePosition) {
-                window._galleryPanelUpdatePosition = updatePanelPosition;
+                window._galleryPanelUpdatePosition = updateMetadataPanelPosition;
                 window.addEventListener('resize', () => {
                     if (metadataVisible && metaPanel && cardEl) {
-                        updatePanelPosition();
+                        updateMetadataPanelPosition();
                     }
                 });
             }
+            
+            // Initial position update
+            setTimeout(() => {
+                updateMetadataPanelPosition();
+            }, 100);
         }
         
         // if we already have an image open, rebuild metadata
@@ -1947,38 +2139,20 @@ function addDeleteButton(imgInfo) {
             
             const result = await galleryApi.batchDelete([filename]);
             
-            // #region agent log
-            fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'details.js:1948',message:'Image deleted successfully',data:{filename,deletedCount:result.count,deletedThumbs:result.deleted_thumbs?.length||0},timestamp:Date.now(),sessionId:'debug-session',runId:'run4',hypothesisId:'BX'})}).catch(()=>{});
-            // #endregion
             
             // CRITICAL: Immediately reload images to remove deleted image from grid
             // This provides instant feedback instead of waiting for file monitor polling
             try {
-                // #region agent log
-                fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'details.js:1952',message:'Reloading images after deletion',data:{filename},timestamp:Date.now(),sessionId:'debug-session',runId:'run4',hypothesisId:'BY'})}).catch(()=>{});
-                // #endregion
                 const images = await galleryApi.listImages();
-                // #region agent log
-                fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'details.js:1955',message:'Images reloaded, updating state',data:{imageCount:images.length,filename},timestamp:Date.now(),sessionId:'debug-session',runId:'run4',hypothesisId:'BZ'})}).catch(()=>{});
-                // #endregion
                 // CRITICAL: Reset the grid flag first to allow setImages to update visibleImages
                 // Then call setImages with resetVisible=true to ensure the grid sees the change
                 if (typeof window !== 'undefined' && window.__USG_GALLERY_GRID_INIT__) {
                     // Reset the flag so setImages can update visibleImages
                     resetGridHasSetVisibleImagesFlag();
                 }
-                // #region agent log
-                fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'details.js:1970',message:'About to call setImages after deletion',data:{imageCount:images.length,prevImageCount:getImages().length},timestamp:Date.now(),sessionId:'debug-session',runId:'run4',hypothesisId:'CN'})}).catch(()=>{});
-                // #endregion
                 setImages(images, true); // Force reset to ensure grid sees the change
                 // Grid will auto-update via state subscription
-                // #region agent log
-                fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'details.js:1974',message:'State updated, grid should re-render',data:{imageCount:images.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run4',hypothesisId:'CA'})}).catch(()=>{});
-                // #endregion
             } catch (reloadErr) {
-                // #region agent log
-                fetch('http://127.0.0.1:7244/ingest/53126dc7-8464-4cbf-a9de-c8319b36dae0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'details.js:1961',message:'Failed to reload images after deletion',data:{error:reloadErr.message,filename},timestamp:Date.now(),sessionId:'debug-session',runId:'run4',hypothesisId:'CB'})}).catch(()=>{});
-                // #endregion
                 console.warn("[UsgromanaGallery] Failed to reload images after deletion:", reloadErr);
                 // Non-fatal - file monitor will catch it eventually
             }

@@ -10,7 +10,8 @@ from PIL import Image
 from aiohttp import web
 from server import PromptServer
 
-from .files import get_output_dir, list_output_images, IMAGE_EXTENSIONS
+from .files import get_output_dir, get_gallery_root_dir, list_output_images, IMAGE_EXTENSIONS
+from folder_paths import get_output_directory
 from .file_monitor import FileMonitor
 from .scanner import BackgroundScanner
 from .. import ASSETS_DIR  # from root __init__.py
@@ -246,7 +247,7 @@ def _safe_join_output(filename: str) -> str | None:
         filename: Can be just a filename (e.g., "image.png") or a relpath 
                   (e.g., "sub/folder/image.png")
     """
-    output_dir = os.path.abspath(get_output_dir())
+    output_dir = os.path.abspath(get_gallery_root_dir())
     
     # Normalize the filename/relpath - convert forward slashes to OS-specific separators
     # and remove any leading slashes or dots
@@ -676,7 +677,7 @@ async def gallery_image(request: web.Request) -> web.StreamResponse:
     size = request.query.get("size")
     if size == "thumb":
         # Thumbnails live under <output>/_thumbs/<filename>
-        base_output = get_output_dir()
+        base_output = get_gallery_root_dir()
         thumbs_dir = os.path.join(base_output, "_thumbs")
         os.makedirs(thumbs_dir, exist_ok=True)
 
@@ -763,7 +764,7 @@ async def gallery_batch_delete(request: web.Request) -> web.Response:
         if not isinstance(filenames, list):
             return _json({"ok": False, "error": "filenames must be a list"}, status=400)
         
-        output_dir = get_output_dir()
+        output_dir = get_gallery_root_dir()
         thumbs_dir = os.path.join(output_dir, "_thumbs")
         # Ensure thumbs directory exists (might not if no thumbnails generated yet)
         os.makedirs(thumbs_dir, exist_ok=True)
@@ -917,7 +918,7 @@ async def gallery_batch_download(request: web.Request) -> web.Response:
             except Exception as e:
                 print(f"[Usgromana-Gallery] Error setting user context for batch download: {e}")
         
-        output_dir = get_output_dir()
+        output_dir = get_gallery_root_dir()
         
         # Create ZIP in memory
         zip_buffer = BytesIO()
@@ -1444,7 +1445,7 @@ async def gallery_rename_file(request: web.Request) -> web.Response:
         print(f"[Usgromana-Gallery] Rename: File renamed successfully from {old_path} to {new_path}")
         
         # Calculate new relpath for metadata/ratings update
-        output_dir = os.path.abspath(get_output_dir())
+        output_dir = os.path.abspath(get_gallery_root_dir())
         new_relpath = os.path.relpath(new_path, output_dir).replace("\\", "/")
         
         # Update metadata if it exists (check both old_filename and old relpath)
@@ -1516,7 +1517,7 @@ async def gallery_log(request: web.Request) -> web.Response:
 def _on_file_change(event_type: str, file_path: str):
     """Handle file system change events."""
     try:
-        output_dir = get_output_dir()
+        output_dir = get_gallery_root_dir()
         if not file_path.startswith(output_dir):
             return
         
@@ -1537,7 +1538,7 @@ def _init_file_monitoring():
     global _file_monitor, _background_scanner
     
     try:
-        output_dir = get_output_dir()
+        output_dir = get_gallery_root_dir()
         if not os.path.isdir(output_dir):
             return
         
@@ -1588,6 +1589,35 @@ async def gallery_save_settings(request: web.Request) -> web.Response:
                     existing = json.load(f) or {}
             except Exception:
                 pass
+        
+        # Check if rootGalleryFolder is being changed
+        if "rootGalleryFolder" in settings:
+            old_root_setting = existing.get("rootGalleryFolder", "").strip()
+            new_root_setting = settings.get("rootGalleryFolder", "").strip()
+            
+            # Get the actual old root directory path (before settings are saved)
+            # Use get_gallery_root_dir() which reads from existing settings
+            old_root_actual = os.path.abspath(get_gallery_root_dir())
+            
+            # Calculate what the new root will be after settings are saved
+            new_root_actual = None
+            if new_root_setting and os.path.isdir(new_root_setting):
+                new_root_actual = os.path.abspath(new_root_setting)
+            else:
+                # Empty or invalid setting means use default
+                new_root_actual = os.path.abspath(get_output_dir())
+            
+            # If the root folder is actually changing, purge thumbnails from the old folder
+            if old_root_actual != new_root_actual:
+                try:
+                    old_thumbs_dir = os.path.join(old_root_actual, "_thumbs")
+                    if os.path.isdir(old_thumbs_dir):
+                        import shutil
+                        shutil.rmtree(old_thumbs_dir)
+                        print(f"[Usgromana-Gallery] Purged thumbnail folder from previous root: {old_thumbs_dir}")
+                except Exception as e:
+                    # Don't fail the settings save if thumbnail purge fails
+                    print(f"[Usgromana-Gallery] Warning: Failed to purge old thumbnail folder: {e}")
         
         merged = {**existing, **settings}
         
@@ -1731,8 +1761,526 @@ async def gallery_batch_generate_thumbnails(request: web.Request) -> web.Respons
         return _json({"ok": False, "error": str(e)}, status=500)
 
 
+@PromptServer.instance.routes.get(f"{ROUTE_PREFIX}/list-folder")
+async def gallery_list_folder(request: web.Request) -> web.Response:
+    """
+    List folders and files in a specific directory path.
+    Query: ?path=<relative_path> (e.g., "sub/folder" or "" for root)
+    Returns: { folders: [...], files: [...] }
+    """
+    try:
+        path = request.query.get("path", "").strip()
+        
+        # Get the root directory (can be overridden by settings)
+        output_dir = get_gallery_root_dir()
+        
+        # If path is provided, join it to the output directory
+        if path:
+            # Normalize path separators
+            normalized = path.replace("/", os.sep).replace("\\", os.sep)
+            normalized = os.path.normpath(normalized)
+            
+            # Security check: prevent directory traversal
+            if normalized.startswith("..") or os.path.isabs(normalized):
+                return _json({"ok": False, "error": "Invalid path"}, status=400)
+            
+            target_dir = os.path.join(output_dir, normalized)
+            
+            # Ensure the target is still within output_dir
+            target_dir = os.path.abspath(target_dir)
+            output_dir_abs = os.path.abspath(output_dir)
+            
+            if not target_dir.startswith(output_dir_abs + os.sep) and target_dir != output_dir_abs:
+                return _json({"ok": False, "error": "Path outside gallery directory"}, status=403)
+        else:
+            target_dir = output_dir
+        
+        if not os.path.isdir(target_dir):
+            return _json({"ok": False, "error": "Directory not found"}, status=404)
+        
+        folders = []
+        files = []
+        
+        try:
+            entries = os.listdir(target_dir)
+        except PermissionError:
+            return _json({"ok": False, "error": "Permission denied"}, status=403)
+        
+        for entry in sorted(entries):
+            # Skip hidden files and thumbnail directories
+            if entry.startswith(".") or entry == "_thumbs":
+                continue
+            
+            entry_path = os.path.join(target_dir, entry)
+            
+            try:
+                if os.path.isdir(entry_path):
+                    # Count items in folder (optional, can be slow for large folders)
+                    try:
+                        count = len([e for e in os.listdir(entry_path) if not e.startswith(".")])
+                    except:
+                        count = 0
+                    
+                    # Calculate relative path for navigation
+                    rel_path = os.path.relpath(entry_path, output_dir).replace("\\", "/")
+                    
+                    folders.append({
+                        "name": entry,
+                        "path": rel_path,
+                        "count": count,
+                    })
+                elif os.path.isfile(entry_path):
+                    # Only include image files
+                    _, ext = os.path.splitext(entry)
+                    if ext.lower() in _current_extensions:
+                        stat = os.stat(entry_path)
+                        rel_path = os.path.relpath(entry_path, output_dir).replace("\\", "/")
+                        
+                        files.append({
+                            "name": entry,
+                            "filename": rel_path,
+                            "path": rel_path,
+                            "size": stat.st_size,
+                            "mtime": stat.st_mtime,
+                        })
+            except (OSError, PermissionError):
+                # Skip entries we can't access
+                continue
+        
+        return _json({
+            "ok": True,
+            "folders": folders,
+            "files": files,
+            "path": path,
+        })
+    except Exception as e:
+        return _json({"ok": False, "error": str(e)}, status=500)
+
+
+@PromptServer.instance.routes.get(f"{ROUTE_PREFIX}/browse-folder")
+async def gallery_browse_folder(request: web.Request) -> web.Response:
+    """
+    Browse any folder on the system (for folder picker).
+    Query: ?path=<absolute_path>
+    Returns: { folders: [...], files: [...], currentPath: "..." }
+    """
+    try:
+        # Get and decode the path parameter
+        path_param = request.query.get("path", "").strip()
+        # URL decode the path
+        if path_param:
+            path = urllib.parse.unquote(path_param)
+        else:
+            path = ""
+        
+        # If no path provided, return root drives (Windows) or root directory (Unix)
+        if not path:
+            import platform
+            if platform.system() == "Windows":
+                # Return Windows drives (C:\, D:\, etc.)
+                import string
+                drives = []
+                for letter in string.ascii_uppercase:
+                    drive = f"{letter}:\\"
+                    if os.path.exists(drive):
+                        drives.append({
+                            "name": f"{letter}:",
+                            "path": drive,
+                            "isDrive": True,
+                        })
+                return _json({
+                    "ok": True,
+                    "folders": drives,
+                    "files": [],
+                    "currentPath": "",
+                })
+            else:
+                # Unix/Linux/Mac - start at root
+                path = "/"
+        
+        # Validate that path is absolute
+        if not os.path.isabs(path):
+            return _json({"ok": False, "error": "Path must be absolute"}, status=400)
+        
+        # Security: Only allow browsing on localhost or if explicitly enabled
+        # For now, we'll allow it since this is a local ComfyUI installation
+        # In production, you might want to add additional checks
+        
+        if not os.path.isdir(path):
+            return _json({"ok": False, "error": "Directory not found"}, status=404)
+        
+        folders = []
+        files = []
+        
+        try:
+            entries = os.listdir(path)
+        except PermissionError:
+            return _json({"ok": False, "error": "Permission denied"}, status=403)
+        
+        for entry in sorted(entries):
+            # Skip hidden files and system directories
+            if entry.startswith("."):
+                continue
+            
+            entry_path = os.path.join(path, entry)
+            
+            try:
+                if os.path.isdir(entry_path):
+                    folders.append({
+                        "name": entry,
+                        "path": entry_path,
+                    })
+                elif os.path.isfile(entry_path):
+                    # Only show files if needed (for folder picker, we mainly care about folders)
+                    stat = os.stat(entry_path)
+                    files.append({
+                        "name": entry,
+                        "path": entry_path,
+                        "size": stat.st_size,
+                    })
+            except (OSError, PermissionError):
+                # Skip entries we can't access
+                continue
+        
+        return _json({
+            "ok": True,
+            "folders": folders,
+            "files": files,
+            "currentPath": path,
+        })
+    except Exception as e:
+        return _json({"ok": False, "error": str(e)}, status=500)
+
+
+@PromptServer.instance.routes.post(f"{ROUTE_PREFIX}/create-folder")
+async def gallery_create_folder(request: web.Request) -> web.Response:
+    """Create a new folder. Body: { "parentPath": "...", "folderName": "..." }"""
+    try:
+        body = await request.json()
+        parent_path = body.get("parentPath", "").strip()
+        folder_name = body.get("folderName", "").strip()
+        
+        if not folder_name:
+            return _json({"ok": False, "error": "Folder name is required"}, status=400)
+        
+        # Sanitize folder name
+        import re
+        folder_name = re.sub(r'[<>:"|?*]', '_', folder_name)
+        if not folder_name:
+            return _json({"ok": False, "error": "Invalid folder name"}, status=400)
+        
+        output_dir = get_gallery_root_dir()
+        
+        # Build target path
+        if parent_path:
+            normalized = parent_path.replace("/", os.sep).replace("\\", os.sep)
+            normalized = os.path.normpath(normalized)
+            if normalized.startswith("..") or os.path.isabs(normalized):
+                return _json({"ok": False, "error": "Invalid path"}, status=400)
+            target_dir = os.path.join(output_dir, normalized)
+        else:
+            target_dir = output_dir
+        
+        target_dir = os.path.abspath(target_dir)
+        output_dir_abs = os.path.abspath(output_dir)
+        
+        if not target_dir.startswith(output_dir_abs + os.sep) and target_dir != output_dir_abs:
+            return _json({"ok": False, "error": "Path outside gallery directory"}, status=403)
+        
+        new_folder_path = os.path.join(target_dir, folder_name)
+        
+        if os.path.exists(new_folder_path):
+            return _json({"ok": False, "error": "Folder already exists"}, status=409)
+        
+        os.makedirs(new_folder_path, exist_ok=True)
+        
+        return _json({"ok": True, "message": "Folder created successfully"})
+    except Exception as e:
+        return _json({"ok": False, "error": str(e)}, status=500)
+
+
+@PromptServer.instance.routes.post(f"{ROUTE_PREFIX}/rename-folder")
+async def gallery_rename_folder(request: web.Request) -> web.Response:
+    """Rename a folder. Body: { "path": "...", "newName": "..." }"""
+    try:
+        body = await request.json()
+        path = body.get("path", "").strip()
+        new_name = body.get("newName", "").strip()
+        
+        if not path or not new_name:
+            return _json({"ok": False, "error": "Path and new name are required"}, status=400)
+        
+        # Sanitize new name
+        import re
+        new_name = re.sub(r'[<>:"|?*]', '_', new_name)
+        if not new_name:
+            return _json({"ok": False, "error": "Invalid folder name"}, status=400)
+        
+        output_dir = get_gallery_root_dir()
+        
+        # Build old and new paths
+        normalized = path.replace("/", os.sep).replace("\\", os.sep)
+        normalized = os.path.normpath(normalized)
+        if normalized.startswith("..") or os.path.isabs(normalized):
+            return _json({"ok": False, "error": "Invalid path"}, status=400)
+        
+        old_path = os.path.join(output_dir, normalized)
+        old_path = os.path.abspath(old_path)
+        output_dir_abs = os.path.abspath(output_dir)
+        
+        if not old_path.startswith(output_dir_abs + os.sep) and old_path != output_dir_abs:
+            return _json({"ok": False, "error": "Path outside gallery directory"}, status=403)
+        
+        if not os.path.isdir(old_path):
+            return _json({"ok": False, "error": "Folder not found"}, status=404)
+        
+        # Get parent directory and build new path
+        parent_dir = os.path.dirname(old_path)
+        new_path = os.path.join(parent_dir, new_name)
+        
+        if os.path.exists(new_path):
+            return _json({"ok": False, "error": "A folder with that name already exists"}, status=409)
+        
+        os.rename(old_path, new_path)
+        
+        return _json({"ok": True, "message": "Folder renamed successfully"})
+    except Exception as e:
+        return _json({"ok": False, "error": str(e)}, status=500)
+
+
+@PromptServer.instance.routes.post(f"{ROUTE_PREFIX}/delete-folder")
+async def gallery_delete_folder(request: web.Request) -> web.Response:
+    """Delete a folder and all its contents. Body: { "path": "..." }"""
+    try:
+        body = await request.json()
+        path = body.get("path", "").strip()
+        
+        if not path:
+            return _json({"ok": False, "error": "Path is required"}, status=400)
+        
+        output_dir = get_gallery_root_dir()
+        
+        # Build target path
+        normalized = path.replace("/", os.sep).replace("\\", os.sep)
+        normalized = os.path.normpath(normalized)
+        if normalized.startswith("..") or os.path.isabs(normalized):
+            return _json({"ok": False, "error": "Invalid path"}, status=400)
+        
+        target_path = os.path.join(output_dir, normalized)
+        target_path = os.path.abspath(target_path)
+        output_dir_abs = os.path.abspath(output_dir)
+        
+        if not target_path.startswith(output_dir_abs + os.sep):
+            return _json({"ok": False, "error": "Path outside gallery directory"}, status=403)
+        
+        if not os.path.isdir(target_path):
+            return _json({"ok": False, "error": "Folder not found"}, status=404)
+        
+        # Prevent deleting root directory
+        if target_path == output_dir_abs:
+            return _json({"ok": False, "error": "Cannot delete root directory"}, status=403)
+        
+        import shutil
+        shutil.rmtree(target_path)
+        
+        return _json({"ok": True, "message": "Folder deleted successfully"})
+    except Exception as e:
+        return _json({"ok": False, "error": str(e)}, status=500)
+
+
+@PromptServer.instance.routes.post(f"{ROUTE_PREFIX}/delete-file")
+async def gallery_delete_file(request: web.Request) -> web.Response:
+    """Delete a file. Body: { "path": "..." }"""
+    try:
+        body = await request.json()
+        path = body.get("path", "").strip()
+        
+        if not path:
+            return _json({"ok": False, "error": "Path is required"}, status=400)
+        
+        safe_path = _safe_join_output(path)
+        if safe_path is None:
+            return _json({"ok": False, "error": "File not found or invalid path"}, status=404)
+        
+        if not os.path.isfile(safe_path):
+            return _json({"ok": False, "error": "File not found"}, status=404)
+        
+        os.remove(safe_path)
+        
+        # Also try to delete thumbnail if it exists
+        try:
+            output_dir = get_gallery_root_dir()
+            thumbs_dir = os.path.join(output_dir, "_thumbs")
+            import hashlib
+            if "/" in path or "\\" in path:
+                relpath_hash = hashlib.md5(path.encode('utf-8')).hexdigest()[:16]
+                original_ext = os.path.splitext(os.path.basename(path))[1] or ".png"
+                thumb_name = f"{relpath_hash}{original_ext}"
+            else:
+                thumb_name = os.path.basename(path)
+            thumb_path = os.path.join(thumbs_dir, thumb_name)
+            if os.path.isfile(thumb_path):
+                os.remove(thumb_path)
+        except Exception:
+            pass  # Thumbnail deletion is optional
+        
+        return _json({"ok": True, "message": "File deleted successfully"})
+    except Exception as e:
+        return _json({"ok": False, "error": str(e)}, status=500)
+
+
+@PromptServer.instance.routes.post(f"{ROUTE_PREFIX}/move-file")
+async def gallery_move_file(request: web.Request) -> web.Response:
+    """Move a file to a different folder. Body: { "filePath": "...", "targetFolderPath": "..." }"""
+    try:
+        body = await request.json()
+        file_path = body.get("filePath", "").strip()
+        target_folder_path = body.get("targetFolderPath", "").strip()
+        
+        if not file_path:
+            return _json({"ok": False, "error": "File path is required"}, status=400)
+        
+        # Get source file
+        safe_source = _safe_join_output(file_path)
+        if safe_source is None:
+            return _json({"ok": False, "error": "File not found or invalid path"}, status=404)
+        
+        if not os.path.isfile(safe_source):
+            return _json({"ok": False, "error": "File not found"}, status=404)
+        
+        output_dir = get_gallery_root_dir()
+        
+        # Build target directory
+        if target_folder_path:
+            normalized = target_folder_path.replace("/", os.sep).replace("\\", os.sep)
+            normalized = os.path.normpath(normalized)
+            if normalized.startswith("..") or os.path.isabs(normalized):
+                return _json({"ok": False, "error": "Invalid target path"}, status=400)
+            target_dir = os.path.join(output_dir, normalized)
+        else:
+            target_dir = output_dir
+        
+        target_dir = os.path.abspath(target_dir)
+        output_dir_abs = os.path.abspath(output_dir)
+        
+        if not target_dir.startswith(output_dir_abs + os.sep) and target_dir != output_dir_abs:
+            return _json({"ok": False, "error": "Target path outside gallery directory"}, status=403)
+        
+        if not os.path.isdir(target_dir):
+            return _json({"ok": False, "error": "Target folder not found"}, status=404)
+        
+        # Move file
+        filename = os.path.basename(safe_source)
+        target_path = os.path.join(target_dir, filename)
+        
+        if os.path.exists(target_path):
+            return _json({"ok": False, "error": "A file with that name already exists in the target folder"}, status=409)
+        
+        os.rename(safe_source, target_path)
+        
+        # Also try to move thumbnail if it exists
+        try:
+            thumbs_dir = os.path.join(output_dir, "_thumbs")
+            import hashlib
+            if "/" in file_path or "\\" in file_path:
+                relpath_hash = hashlib.md5(file_path.encode('utf-8')).hexdigest()[:16]
+                original_ext = os.path.splitext(os.path.basename(file_path))[1] or ".png"
+                thumb_name = f"{relpath_hash}{original_ext}"
+            else:
+                thumb_name = os.path.basename(file_path)
+            old_thumb_path = os.path.join(thumbs_dir, thumb_name)
+            
+            # Calculate new relpath for thumbnail
+            new_relpath = os.path.relpath(target_path, output_dir).replace("\\", "/")
+            if "/" in new_relpath or "\\" in new_relpath:
+                new_relpath_hash = hashlib.md5(new_relpath.encode('utf-8')).hexdigest()[:16]
+                new_thumb_name = f"{new_relpath_hash}{original_ext}"
+            else:
+                new_thumb_name = filename
+            new_thumb_path = os.path.join(thumbs_dir, new_thumb_name)
+            
+            if os.path.isfile(old_thumb_path) and not os.path.exists(new_thumb_path):
+                os.rename(old_thumb_path, new_thumb_path)
+        except Exception:
+            pass  # Thumbnail move is optional
+        
+        return _json({"ok": True, "message": "File moved successfully"})
+    except Exception as e:
+        return _json({"ok": False, "error": str(e)}, status=500)
+
+
+@PromptServer.instance.routes.post(f"{ROUTE_PREFIX}/move-folder")
+async def gallery_move_folder(request: web.Request) -> web.Response:
+    """Move a folder to a different location. Body: { "folderPath": "...", "targetFolderPath": "..." }"""
+    try:
+        body = await request.json()
+        folder_path = body.get("folderPath", "").strip()
+        target_folder_path = body.get("targetFolderPath", "").strip()
+        
+        if not folder_path:
+            return _json({"ok": False, "error": "Folder path is required"}, status=400)
+        
+        output_dir = get_gallery_root_dir()
+        
+        # Build source folder path
+        normalized = folder_path.replace("/", os.sep).replace("\\", os.sep)
+        normalized = os.path.normpath(normalized)
+        if normalized.startswith("..") or os.path.isabs(normalized):
+            return _json({"ok": False, "error": "Invalid source path"}, status=400)
+        
+        source_path = os.path.join(output_dir, normalized)
+        source_path = os.path.abspath(source_path)
+        output_dir_abs = os.path.abspath(output_dir)
+        
+        if not source_path.startswith(output_dir_abs + os.sep):
+            return _json({"ok": False, "error": "Source path outside gallery directory"}, status=403)
+        
+        if not os.path.isdir(source_path):
+            return _json({"ok": False, "error": "Source folder not found"}, status=404)
+        
+        # Prevent moving root directory
+        if source_path == output_dir_abs:
+            return _json({"ok": False, "error": "Cannot move root directory"}, status=403)
+        
+        # Build target directory
+        if target_folder_path:
+            normalized_target = target_folder_path.replace("/", os.sep).replace("\\", os.sep)
+            normalized_target = os.path.normpath(normalized_target)
+            if normalized_target.startswith("..") or os.path.isabs(normalized_target):
+                return _json({"ok": False, "error": "Invalid target path"}, status=400)
+            target_dir = os.path.join(output_dir, normalized_target)
+        else:
+            target_dir = output_dir
+        
+        target_dir = os.path.abspath(target_dir)
+        
+        if not target_dir.startswith(output_dir_abs + os.sep) and target_dir != output_dir_abs:
+            return _json({"ok": False, "error": "Target path outside gallery directory"}, status=403)
+        
+        if not os.path.isdir(target_dir):
+            return _json({"ok": False, "error": "Target folder not found"}, status=404)
+        
+        # Prevent moving folder into itself or its subdirectories
+        if target_dir.startswith(source_path + os.sep) or target_dir == source_path:
+            return _json({"ok": False, "error": "Cannot move folder into itself"}, status=400)
+        
+        # Move folder
+        folder_name = os.path.basename(source_path)
+        target_path = os.path.join(target_dir, folder_name)
+        
+        if os.path.exists(target_path):
+            return _json({"ok": False, "error": "A folder with that name already exists in the target location"}, status=409)
+        
+        os.rename(source_path, target_path)
+        
+        return _json({"ok": True, "message": "Folder moved successfully"})
+    except Exception as e:
+        return _json({"ok": False, "error": str(e)}, status=500)
+
+
 # Initialize file monitoring when routes are loaded
 _init_file_monitoring()
 
 # Debug: Print registered routes
 print(f"[Usgromana-Gallery] Registered route: POST {ROUTE_PREFIX}/mark-nsfw")
+print(f"[Usgromana-Gallery] Registered route: GET {ROUTE_PREFIX}/browse-folder")
