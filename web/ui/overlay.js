@@ -303,6 +303,10 @@ export function openGalleryOverlay() {
     showOverlay();
 }
 
+export function isOverlayVisible() {
+    return overlayEl !== null && overlayEl.style.display !== "none";
+}
+
 // -------------------------------------------------------------------
 // Settings modal  (no group toggle anymore)
 // -------------------------------------------------------------------

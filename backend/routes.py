@@ -48,7 +48,7 @@ def _migrate_data_files():
 _migrate_data_files()
 
 # Try to import ComfyUI-Usgromana NSFW API
-_NSFW_API_AVAILABLE = False
+_USGROMANA_API_AVAILABLE = False
 try:
     import importlib.util
     
@@ -58,45 +58,53 @@ try:
     custom_nodes_dir = os.path.dirname(os.path.dirname(current_file_dir))
     usgromana_api_path = os.path.join(custom_nodes_dir, "ComfyUI-Usgromana", "api.py")
     
-    nsfw_api = None
-    
-    # Try direct file import first (most reliable)
-    if os.path.exists(usgromana_api_path):
+    usgromana_api = None
+
+    # Try package import first — this gets the already-loaded module with fully
+    # initialised state (access_control, users_db, etc.). File-path loading
+    # creates a fresh instance where relative imports in globals.py fail.
+    try:
+        import ComfyUI_Usgromana.api as usgromana_api
+        _USGROMANA_API_AVAILABLE = True
+        print("[Usgromana-Gallery] Usgromana API loaded via package import")
+    except ImportError:
+        pass
+
+    # Fallback: add the Usgromana directory to sys.path and import directly
+    if not _USGROMANA_API_AVAILABLE:
+        usgromana_dir = os.path.join(custom_nodes_dir, "ComfyUI-Usgromana")
+        if os.path.exists(usgromana_dir) and usgromana_dir not in sys.path:
+            sys.path.insert(0, usgromana_dir)
+        try:
+            import api as usgromana_api
+            _USGROMANA_API_AVAILABLE = True
+            print("[Usgromana-Gallery] Usgromana API loaded via sys.path import")
+        except ImportError:
+            pass
+
+    # Last resort: load by file path
+    if not _USGROMANA_API_AVAILABLE and os.path.exists(usgromana_api_path):
         try:
             spec = importlib.util.spec_from_file_location("usgromana_api", usgromana_api_path)
             if spec and spec.loader:
-                nsfw_api = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(nsfw_api)
-                _NSFW_API_AVAILABLE = True
+                usgromana_api = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(usgromana_api)
+                _USGROMANA_API_AVAILABLE = True
+                print("[Usgromana-Gallery] Usgromana API loaded via file path (access_control may be unavailable)")
         except Exception as e:
-            print(f"[Usgromana-Gallery] Failed to load NSFW API from file: {e}")
+            print(f"[Usgromana-Gallery] Failed to load Usgromana API from file: {e}")
     
-    # If direct import didn't work, try module import
-    if not _NSFW_API_AVAILABLE:
-        try:
-            # Try importing as a module (if it's in sys.path)
-            import ComfyUI_Usgromana.api as nsfw_api
-            _NSFW_API_AVAILABLE = True
-        except ImportError:
-            # Try adding the Usgromana directory to path
-            usgromana_dir = os.path.join(custom_nodes_dir, "ComfyUI-Usgromana")
-            if os.path.exists(usgromana_dir) and usgromana_dir not in sys.path:
-                sys.path.insert(0, usgromana_dir)
-                try:
-                    import api as nsfw_api
-                    _NSFW_API_AVAILABLE = True
-                except ImportError:
-                    pass
-    
-    if _NSFW_API_AVAILABLE and nsfw_api:
-        check_image_path_nsfw = nsfw_api.check_image_path_nsfw
-        check_image_path_nsfw_fast = getattr(nsfw_api, 'check_image_path_nsfw_fast', None)
-        check_pil_image_nsfw = getattr(nsfw_api, 'check_pil_image_nsfw', None)
-        get_current_user = nsfw_api.get_current_user
-        set_user_context = nsfw_api.set_user_context
-        is_sfw_enforced_for_user = nsfw_api.is_sfw_enforced_for_user
+    if _USGROMANA_API_AVAILABLE and usgromana_api:
+        check_image_path_nsfw = usgromana_api.check_image_path_nsfw
+        check_image_path_nsfw_fast = getattr(usgromana_api, 'check_image_path_nsfw_fast', None)
+        check_pil_image_nsfw = getattr(usgromana_api, 'check_pil_image_nsfw', None)
+        get_current_user = usgromana_api.get_current_user
+        set_user_context = usgromana_api.set_user_context
+        is_sfw_enforced_for_user = usgromana_api.is_sfw_enforced_for_user
+        get_request_user_id = getattr(usgromana_api, 'get_request_user_id', None)
+        request_has_permission = getattr(usgromana_api, 'request_has_permission', None)
         # Get function to manually set NSFW tag (new API function)
-        set_image_nsfw_tag = getattr(nsfw_api, 'set_image_nsfw_tag', None)
+        set_image_nsfw_tag = getattr(usgromana_api, 'set_image_nsfw_tag', None)
         # Try to get the internal function that actually checks images
         # This bypasses the session check for guests
         _get_nsfw_pipeline = None
@@ -105,7 +113,7 @@ try:
         # Try to get _get_nsfw_pipeline from the API module itself
         # The API might expose it or we can access it through the module
         try:
-            _get_nsfw_pipeline = getattr(nsfw_api, '_get_nsfw_pipeline', None)
+            _get_nsfw_pipeline = getattr(usgromana_api, '_get_nsfw_pipeline', None)
             if _get_nsfw_pipeline:
                 print("[Usgromana-Gallery] Found _get_nsfw_pipeline in API module")
         except:
@@ -162,7 +170,7 @@ try:
             pass
         
         # Check if the API itself loaded successfully
-        if _NSFW_API_AVAILABLE:
+        if _USGROMANA_API_AVAILABLE:
             print("[Usgromana-Gallery] NSFW API integration enabled (using public API)")
         else:
             print("[Usgromana-Gallery] NSFW API not available - ComfyUI-Usgromana extension may not be installed or has errors")
@@ -181,7 +189,7 @@ except Exception as e:
         traceback.print_exc()
 
 # Define fallback functions if API not available
-if not _NSFW_API_AVAILABLE:
+if not _USGROMANA_API_AVAILABLE:
     def check_image_path_nsfw(*args, **kwargs):
         return False
     check_image_path_nsfw_fast = None  # Fast check not available when API not available
@@ -192,6 +200,10 @@ if not _NSFW_API_AVAILABLE:
         pass
     def is_sfw_enforced_for_user(*args, **kwargs):
         return False
+    def get_request_user_id(*args, **kwargs):
+        return None
+    def request_has_permission(*args, **kwargs):
+        return True  # No permissions system available — fail open
     should_block_image_for_current_user = None
     _get_nsfw_pipeline = None
     set_image_nsfw_tag = None  # Fallback if API not available
@@ -288,7 +300,7 @@ def _get_username_from_request(request: web.Request) -> Optional[str]:
     before the request reaches our handlers, so the API's get_current_user()
     should work if the context is properly set.
     """
-    if not _NSFW_API_AVAILABLE:
+    if not _USGROMANA_API_AVAILABLE:
         return None
     
     try:
@@ -373,7 +385,7 @@ def _apply_nsfw_filter(request: web.Request, images):
     1. Request-level cache (short-lived) to avoid re-filtering identical requests
     2. Image-level cache (long-lived) to avoid re-checking the same images
     """
-    if not _NSFW_API_AVAILABLE:
+    if not _USGROMANA_API_AVAILABLE:
         # If API not available, return all images (fail open)
         return images
     
@@ -562,6 +574,14 @@ def _apply_nsfw_filter(request: web.Request, images):
             return images
 
 
+# --- Per-user gallery access (RBAC via Usgromana groups config) ---
+
+# Permission keys derived from app.registerExtension({ name: "..." })
+# getSanitizedId() in usgromana_settings.js produces these keys.
+_GALLERY_VIEW_ALL_PERM = "settings_usgromanagalleryviewall"
+
+
+
 # --- Static assets (icons, logos, etc.) ---------------------------
 
 # Serve files at: /usgromana-gallery/assets/<filename>
@@ -574,28 +594,45 @@ PromptServer.instance.app.router.add_static(
 # --- Image listing & serving --------------------------------------
 
 
+_GALLERY_BASE_PERM = "settings_usgromanagallery"
+
 @PromptServer.instance.routes.get(f"{ROUTE_PREFIX}/list")
 async def gallery_list(request: web.Request) -> web.Response:
     """
-    Return basic info about images in the output directory, including
-    recursive subfolders. Also returns a folder list for the UI.
-    """
-    try:
-        # Use current extensions (may be overridden by settings)
-        images = list_output_images(extensions=_current_extensions)
+    Return images from the output directory.
 
-        # Apply NSFW filtering based on current user / SFW flag.
+    Behaviour is determined by the caller's permissions:
+      - UsgromanaGallery.ViewAll granted → return all images
+      - UsgromanaGallery granted (but not ViewAll) → return only the user's own images
+      - Neither granted → 403
+    """
+    has_view_all = request_has_permission(request, _GALLERY_VIEW_ALL_PERM)
+    has_base = request_has_permission(request, _GALLERY_BASE_PERM)
+
+    if not has_view_all and not has_base:
+        return web.Response(status=403, text="Access denied")
+
+    try:
+        images = list_output_images(extensions=_current_extensions)
         images = _apply_nsfw_filter(request, images)
+
+        if not has_view_all:
+            # Scope to the requesting user's subfolder
+            user_id = get_request_user_id(request)
+            if user_id:
+                prefix = user_id + "/"
+                images = [img for img in images if img.relpath.startswith(prefix)]
+            elif _USGROMANA_API_AVAILABLE:
+                # API loaded but user unidentifiable — show nothing
+                images = []
+            # else: API not available — fail open, return all images
 
         base_url = f"{ROUTE_PREFIX}/image"
         payload_images = []
-
-        # Build folder summary map
         folders_map: dict[str, dict] = {}
 
         for img in images:
             d = img.to_dict()
-            # URL used by frontend to actually load the file
             d["url"] = f"{base_url}?filename={urllib.parse.quote(img.relpath)}"
             payload_images.append(d)
 
@@ -615,7 +652,7 @@ async def gallery_list(request: web.Request) -> web.Response:
 
         return _json({"ok": True, "images": payload_images, "folders": folder_list})
     except Exception as e:
-        # Don't blow up Comfy if something goes wrong
+        print(f"[Usgromana-Gallery] /list: error: {e}")
         return _json({"ok": False, "error": str(e)}, status=500)
 
 
@@ -638,7 +675,7 @@ async def gallery_image(request: web.Request) -> web.StreamResponse:
         return _json({"ok": False, "error": "File not found or invalid path"}, status=404)
 
     # Check NSFW restrictions before serving the image
-    if _NSFW_API_AVAILABLE:
+    if _USGROMANA_API_AVAILABLE:
         try:
             username = _get_username_from_request(request)
             
@@ -698,7 +735,7 @@ async def gallery_image(request: web.Request) -> web.StreamResponse:
         thumb_path = os.path.join(thumbs_dir, thumb_name)
 
         # Check NSFW before serving or generating thumbnail
-        if _NSFW_API_AVAILABLE:
+        if _USGROMANA_API_AVAILABLE:
             try:
                 username = _get_username_from_request(request)
                 # Set user context (only if different from current)
@@ -905,7 +942,7 @@ async def gallery_batch_download(request: web.Request) -> web.Response:
         
         # Get username for NSFW checks
         username = None
-        if _NSFW_API_AVAILABLE:
+        if _USGROMANA_API_AVAILABLE:
             try:
                 username = _get_username_from_request(request)
                 # Set user context (only if different from current)
@@ -930,7 +967,7 @@ async def gallery_batch_download(request: web.Request) -> web.Response:
                     continue
                 
                 # Check NSFW restrictions
-                if _NSFW_API_AVAILABLE:
+                if _USGROMANA_API_AVAILABLE:
                     try:
                         should_block = check_image_path_nsfw(safe_path, username)
                         if should_block:
@@ -992,7 +1029,7 @@ async def gallery_mark_nsfw(request: web.Request) -> web.Response:
     Mark an image as NSFW using the NSFW API.
     Body: { "filename": "..." }
     """
-    if not _NSFW_API_AVAILABLE:
+    if not _USGROMANA_API_AVAILABLE:
         return _json({"ok": False, "error": "NSFW API not available"}, status=503)
     
     try:
@@ -1199,7 +1236,7 @@ async def gallery_get_meta(request: web.Request) -> web.Response:
     # Add NSFW status if API is available
     # We need to check the ACTUAL NSFW status of the image, not whether it should be blocked for the current user
     # The best way is to read the NSFW tag directly from the image metadata
-    if _NSFW_API_AVAILABLE:
+    if _USGROMANA_API_AVAILABLE:
         try:
             if safe_path:
                 # Try to read NSFW tag directly from image metadata first

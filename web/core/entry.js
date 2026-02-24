@@ -6,7 +6,7 @@ import { setImages } from "./state.js";
 import { ASSETS, PERFORMANCE } from "./constants.js";
 import { createManagedInterval } from "./utils.js";
 
-import { showOverlay, createOverlay } from "../ui/overlay.js";
+import { showOverlay, createOverlay, isOverlayVisible } from "../ui/overlay.js";
 import {
     getGallerySettings,
     subscribeGallerySettings,
@@ -74,12 +74,16 @@ function startFileWatching() {
     // Poll for file changes periodically
     const managed = createManagedInterval(async () => {
         try {
+            // Skip polling while the gallery is not visible — no point hitting
+            // the server when the user isn't looking at the results.
+            if (!isOverlayVisible()) return;
+
             const currentSettings = getGallerySettings();
             if (!currentSettings.enableRealTimeUpdates) {
                 stopFileWatching();
                 return;
             }
-            
+
             const monitoring = await galleryApi.checkWatchStatus();
             if (monitoring) {
                 // If monitoring is active, reload images to catch changes
