@@ -252,7 +252,8 @@ def request_has_permission(request, permission_key: str) -> bool:
     if _request_has_permission_fn is None:
         import sys
         for mod_name, mod in list(sys.modules.items()):
-            if 'usgromana' not in mod_name.lower():
+            low = mod_name.lower()
+            if 'usgromana' not in low or 'gallery' in low:
                 continue
             fn = getattr(mod, 'request_has_permission', None)
             if callable(fn):
