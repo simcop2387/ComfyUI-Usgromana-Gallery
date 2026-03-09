@@ -238,16 +238,28 @@ else:
     pass
 
 # request_has_permission is always resolved lazily at call time.
-# The gallery module loads before Usgromana, so eager import fails. By the
-# time any HTTP request arrives, all custom nodes are fully initialized.
+# The gallery loads before Usgromana, so any eager import fails.  By the time
+# an HTTP request arrives all custom nodes are initialized.
+#
+# ComfyUI registers the module under the directory name "ComfyUI-Usgromana"
+# (hyphen, not underscore), so `import ComfyUI_Usgromana.api` won't work.
+# Instead we scan sys.modules for any submodule whose parent contains
+# "usgromana" and which exposes request_has_permission.
+_request_has_permission_fn = None
+
 def request_has_permission(request, permission_key: str) -> bool:
-    try:
-        import ComfyUI_Usgromana.api as _usgromana_api
-        fn = getattr(_usgromana_api, 'request_has_permission', None)
-        if callable(fn):
-            return fn(request, permission_key)
-    except ImportError:
-        pass
+    global _request_has_permission_fn
+    if _request_has_permission_fn is None:
+        import sys
+        for mod_name, mod in list(sys.modules.items()):
+            if 'usgromana' not in mod_name.lower():
+                continue
+            fn = getattr(mod, 'request_has_permission', None)
+            if callable(fn):
+                _request_has_permission_fn = fn
+                break
+    if _request_has_permission_fn is not None:
+        return _request_has_permission_fn(request, permission_key)
     raise RuntimeError(
         "[Usgromana-Gallery] request_has_permission is unavailable — "
         "ComfyUI-Usgromana is not installed or failed to load"
