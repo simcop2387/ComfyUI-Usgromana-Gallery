@@ -60,39 +60,60 @@ try:
     
     usgromana_api = None
 
+    def _is_valid_usgromana_api(mod):
+        """Verify the loaded module is actually Usgromana's api, not a stale
+        sys.modules hit from another extension that also has an api.py."""
+        return mod is not None and callable(getattr(mod, 'request_has_permission', None))
+
     # Try package import first — this gets the already-loaded module with fully
     # initialised state (access_control, users_db, etc.). File-path loading
     # creates a fresh instance where relative imports in globals.py fail.
     try:
         import ComfyUI_Usgromana.api as usgromana_api
-        _USGROMANA_API_AVAILABLE = True
-        print("[Usgromana-Gallery] Usgromana API loaded via package import")
+        if _is_valid_usgromana_api(usgromana_api):
+            _USGROMANA_API_AVAILABLE = True
+            print("[Usgromana-Gallery] Usgromana API loaded via package import")
+        else:
+            print("[Usgromana-Gallery] Package import returned unexpected module, falling back")
+            usgromana_api = None
     except ImportError:
         pass
 
-    # Fallback: add the Usgromana directory to sys.path and import directly
-    if not _USGROMANA_API_AVAILABLE:
-        usgromana_dir = os.path.join(custom_nodes_dir, "ComfyUI-Usgromana")
-        if os.path.exists(usgromana_dir) and usgromana_dir not in sys.path:
-            sys.path.insert(0, usgromana_dir)
-        try:
-            import api as usgromana_api
-            _USGROMANA_API_AVAILABLE = True
-            print("[Usgromana-Gallery] Usgromana API loaded via sys.path import")
-        except ImportError:
-            pass
-
-    # Last resort: load by file path
+    # Fallback: load by file path (reliable — always targets the correct file).
+    # We prefer this over a bare `import api` because `api` can already be
+    # cached in sys.modules from another extension that also ships an api.py,
+    # causing us to silently pick up the wrong module.
     if not _USGROMANA_API_AVAILABLE and os.path.exists(usgromana_api_path):
         try:
             spec = importlib.util.spec_from_file_location("usgromana_api", usgromana_api_path)
             if spec and spec.loader:
                 usgromana_api = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(usgromana_api)
-                _USGROMANA_API_AVAILABLE = True
-                print("[Usgromana-Gallery] Usgromana API loaded via file path (access_control may be unavailable)")
+                if _is_valid_usgromana_api(usgromana_api):
+                    _USGROMANA_API_AVAILABLE = True
+                    print("[Usgromana-Gallery] Usgromana API loaded via file path")
+                else:
+                    print("[Usgromana-Gallery] File-path import missing expected API functions")
+                    usgromana_api = None
         except Exception as e:
             print(f"[Usgromana-Gallery] Failed to load Usgromana API from file: {e}")
+
+    # Last resort: bare sys.path import — least reliable, kept only as final
+    # attempt since sys.modules caching can return the wrong module.
+    if not _USGROMANA_API_AVAILABLE:
+        usgromana_dir = os.path.join(custom_nodes_dir, "ComfyUI-Usgromana")
+        if os.path.exists(usgromana_dir) and usgromana_dir not in sys.path:
+            sys.path.insert(0, usgromana_dir)
+        try:
+            import api as usgromana_api
+            if _is_valid_usgromana_api(usgromana_api):
+                _USGROMANA_API_AVAILABLE = True
+                print("[Usgromana-Gallery] Usgromana API loaded via sys.path import")
+            else:
+                print("[Usgromana-Gallery] sys.path import returned unexpected module — Usgromana API unavailable")
+                usgromana_api = None
+        except ImportError:
+            pass
     
     if _USGROMANA_API_AVAILABLE and usgromana_api:
         check_image_path_nsfw = usgromana_api.check_image_path_nsfw
