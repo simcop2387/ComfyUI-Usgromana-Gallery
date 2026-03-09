@@ -251,13 +251,20 @@ def request_has_permission(request, permission_key: str) -> bool:
     global _request_has_permission_fn
     if _request_has_permission_fn is None:
         import sys
-        for mod_name, mod in list(sys.modules.items()):
+        # Dump every sys.modules key that contains 'usgromana' so we can see
+        # exactly how ComfyUI registered the module.
+        usgromana_keys = sorted(k for k in sys.modules if 'usgromana' in k.lower())
+        print(f"[Usgromana-Gallery] DEBUG sys.modules usgromana keys: {usgromana_keys}")
+        for mod_name in usgromana_keys:
+            mod = sys.modules[mod_name]
             low = mod_name.lower()
-            if 'usgromana' not in low or 'gallery' in low:
+            has_fn = callable(getattr(mod, 'request_has_permission', None))
+            print(f"[Usgromana-Gallery] DEBUG   {mod_name!r}: gallery={('gallery' in low)}, has_fn={has_fn}")
+            if 'gallery' in low:
                 continue
-            fn = getattr(mod, 'request_has_permission', None)
-            if callable(fn):
-                _request_has_permission_fn = fn
+            if has_fn:
+                _request_has_permission_fn = getattr(mod, 'request_has_permission')
+                print(f"[Usgromana-Gallery] DEBUG resolved request_has_permission from {mod_name!r}")
                 break
     if _request_has_permission_fn is not None:
         return _request_has_permission_fn(request, permission_key)
