@@ -251,19 +251,23 @@ def request_has_permission(request, permission_key: str) -> bool:
     global _request_has_permission_fn
     if _request_has_permission_fn is None:
         import sys
-        # Dump every sys.modules key that contains 'usgromana' so we can see
-        # exactly how ComfyUI registered the module.
-        usgromana_keys = sorted(k for k in sys.modules if 'usgromana' in k.lower())
-        print(f"[Usgromana-Gallery] DEBUG sys.modules usgromana keys: {usgromana_keys}")
+        # Targeted debug: inspect the Usgromana api module specifically
+        api_key = next((k for k in sys.modules if 'usgromana' in k.lower() and k.endswith('.api') and 'gallery' not in k.lower()), None)
+        api_mod = sys.modules.get(api_key) if api_key else None
+        print(f"[Usgromana-Gallery] DEBUG api_key={api_key!r}, api_mod type={type(api_mod)}, is None={api_mod is None}")
+        if api_mod is not None:
+            pub_callables = [k for k in dir(api_mod) if not k.startswith('_') and callable(getattr(api_mod, k, None))]
+            print(f"[Usgromana-Gallery] DEBUG api_mod public callables: {pub_callables}")
+            print(f"[Usgromana-Gallery] DEBUG api_mod __file__: {getattr(api_mod, '__file__', 'N/A')}")
+            print(f"[Usgromana-Gallery] DEBUG api_mod has request_has_permission attr: {hasattr(api_mod, 'request_has_permission')}")
+        # Scan all non-gallery usgromana modules
+        usgromana_keys = sorted(k for k in sys.modules if 'usgromana' in k.lower() and 'gallery' not in k.lower())
         for mod_name in usgromana_keys:
             mod = sys.modules[mod_name]
-            low = mod_name.lower()
-            has_fn = callable(getattr(mod, 'request_has_permission', None))
-            print(f"[Usgromana-Gallery] DEBUG   {mod_name!r}: gallery={('gallery' in low)}, has_fn={has_fn}")
-            if 'gallery' in low:
-                continue
+            fn = getattr(mod, 'request_has_permission', None)
+            has_fn = callable(fn)
             if has_fn:
-                _request_has_permission_fn = getattr(mod, 'request_has_permission')
+                _request_has_permission_fn = fn
                 print(f"[Usgromana-Gallery] DEBUG resolved request_has_permission from {mod_name!r}")
                 break
     if _request_has_permission_fn is not None:
