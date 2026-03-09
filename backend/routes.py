@@ -123,7 +123,8 @@ try:
         set_user_context = usgromana_api.set_user_context
         is_sfw_enforced_for_user = usgromana_api.is_sfw_enforced_for_user
         get_request_user_id = getattr(usgromana_api, 'get_request_user_id', None)
-        request_has_permission = getattr(usgromana_api, 'request_has_permission', None)
+        # Do NOT assign request_has_permission here — the lazy wrapper defined
+        # below is always used so it retries at request time if needed.
         # Get function to manually set NSFW tag (new API function)
         set_image_nsfw_tag = getattr(usgromana_api, 'set_image_nsfw_tag', None)
         # Try to get the internal function that actually checks images
@@ -223,8 +224,6 @@ if not _USGROMANA_API_AVAILABLE:
         return False
     def get_request_user_id(*args, **kwargs):
         return None
-    def request_has_permission(*args, **kwargs):
-        return True  # No permissions system available — fail open
     should_block_image_for_current_user = None
     _get_nsfw_pipeline = None
     set_image_nsfw_tag = None  # Fallback if API not available
@@ -237,6 +236,22 @@ else:
     # - set_image_nsfw_tag: set at line 98 (may be None if not available in API)
     # Do NOT overwrite them here, as they may have been successfully loaded
     pass
+
+# request_has_permission is always resolved lazily at call time.
+# The gallery module loads before Usgromana, so eager import fails. By the
+# time any HTTP request arrives, all custom nodes are fully initialized.
+def request_has_permission(request, permission_key: str) -> bool:
+    try:
+        import ComfyUI_Usgromana.api as _usgromana_api
+        fn = getattr(_usgromana_api, 'request_has_permission', None)
+        if callable(fn):
+            return fn(request, permission_key)
+    except ImportError:
+        pass
+    raise RuntimeError(
+        "[Usgromana-Gallery] request_has_permission is unavailable — "
+        "ComfyUI-Usgromana is not installed or failed to load"
+    )
 
 # Use a unique prefix to avoid clashing with Usgromana RBAC
 USGROMANA_GALLERY = "/usgromana-gallery"
